@@ -9,6 +9,9 @@ import warnings
 import requests
 import io
 import base64
+import subprocess
+import os
+from datetime import datetime
 
 warnings.filterwarnings("ignore")
 
@@ -42,6 +45,51 @@ def update_proxy_config(enabled, http_proxy, https_proxy):
         return f"✅ 代理已启用: HTTP={PROXY_CONFIG['http'] or 'None'}, HTTPS={PROXY_CONFIG['https'] or 'None'}"
     else:
         return "❌ 代理已禁用"
+
+def auto_push_to_github():
+    """自动推送到 GitHub"""
+    try:
+        print("🚀 开始自动推送到 GitHub...")
+        
+        # 检查是否在 git 仓库中
+        result = subprocess.run("git status", shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return "❌ 当前目录不是 git 仓库或 git 未安装"
+        
+        # 添加所有更改的文件
+        result = subprocess.run("git add .", shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return f"❌ 添加文件失败: {result.stderr}"
+        
+        # 检查是否有更改需要提交
+        result = subprocess.run("git diff --staged --quiet", shell=True, capture_output=True, text=True)
+        if result.returncode == 0:  # 如果命令成功，说明没有更改
+            return "✅ 没有新的更改需要提交"
+        
+        # 生成时间戳
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 准备提交信息
+        commit_message = f"Auto update: {timestamp} - 功能更新和优化"
+        
+        # 提交更改
+        result = subprocess.run(f'git commit -m "{commit_message}"', shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return f"❌ 提交失败: {result.stderr}"
+        
+        # 推送到远程仓库
+        result = subprocess.run("git push origin main", shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return f"❌ 推送失败: {result.stderr}\n💡 请检查网络连接或 GitHub 权限"
+        
+        # 获取仓库 URL
+        result = subprocess.run("git remote get-url origin", shell=True, capture_output=True, text=True)
+        repo_url = result.stdout.strip() if result.returncode == 0 else "未知"
+        
+        return f"✅ 成功推送到 GitHub!\n🔗 仓库: {repo_url}\n⏰ 时间: {timestamp}"
+        
+    except Exception as e:
+        return f"❌ 推送过程中发生错误: {str(e)}"
 
 # API模式下的推理端点
 API_ENDPOINTS = {
@@ -613,6 +661,30 @@ def create_interface():
         
         load_status = gr.Textbox(label="加载状态", value="选择模型后点击加载开始使用", lines=3)
         
+        # GitHub 自动推送区域
+        with gr.Accordion("🚀 GitHub 自动推送", open=False):
+            gr.Markdown("""
+            **📦 代码同步功能：**
+            - 自动将当前所有更改推送到 GitHub 仓库
+            - 包含代码更新、新增文件、配置修改等
+            - 适合开发过程中的版本备份和同步
+            
+            **⚠️ 注意事项：**
+            - 确保已配置 GitHub 访问权限
+            - 建议在重要功能完成后使用
+            - 推送前会自动添加所有更改文件
+            """)
+            
+            with gr.Row():
+                push_to_github_btn = gr.Button("🚀 推送到 GitHub", variant="primary", size="lg")
+                github_status = gr.Textbox(
+                    label="推送状态",
+                    value="点击按钮将代码推送到 GitHub 仓库",
+                    interactive=False,
+                    lines=2
+                )
+        
+        
         # Prompt 辅助选择器
         with gr.Accordion("🎯 Prompt 辅助选择器", open=False):
             gr.Markdown("### 💡 选择词条快速构建高质量提示词")
@@ -942,6 +1014,13 @@ def create_interface():
             update_proxy_settings,
             inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
             outputs=[proxy_status]
+        )
+        
+        # GitHub 推送事件
+        push_to_github_btn.click(
+            auto_push_to_github,
+            inputs=[],
+            outputs=[github_status]
         )
         
         # 模型加载事件
