@@ -1414,8 +1414,15 @@ def create_interface():
             inputs=[prompt2, negative_prompt2, control_image, control_type_radio, num_steps2, guidance_scale2, controlnet_scale, width2, height2, seed2],
             outputs=[output_image2, control_preview, output_status2]
         )
-    
-    return demo
+        
+        # 更新模型选择器
+        run_mode_radio.change(
+            update_model_choices,
+            inputs=[run_mode_radio],
+            outputs=[model_dropdown]
+        )
+        
+        return demo
 
 def query_hf_api(endpoint, payload, api_token=None):
     """Call Hugging Face API with proxy support"""
@@ -1660,382 +1667,25 @@ def update_model_choices(run_mode):
             info="💾 本地模式 - 首次使用需要下载模型文件（4-10GB）"
         )
 
-# ...existing code...
-
-        # 代理设置事件
-        def update_proxy_settings(enabled, http_proxy, https_proxy):
-            status = update_proxy_config(enabled, http_proxy, https_proxy)
-            return status
-        
-        proxy_enabled.change(
-            update_proxy_settings,
-            inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
-            outputs=[proxy_status]
-        )
-        
-        http_proxy_input.change(
-            update_proxy_settings,
-            inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
-            outputs=[proxy_status]
-        )
-        
-        https_proxy_input.change(
-            update_proxy_settings,
-            inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
-            outputs=[proxy_status]
-        )
-        
-        # GitHub 推送事件
-        push_to_github_btn.click(
-            auto_push_to_github,
-            inputs=[],
-            outputs=[github_status]
-        )
-        
-        # API Token 实时验证
-        api_token_input.change(
-            validate_api_key,
-            inputs=[api_token_input],
-            outputs=[token_status]
-        )
-        
-        # 模型API支持检测
-        def update_model_api_status(model_id, run_mode):
-            return check_model_api_support(model_id, run_mode)
-        
-        model_dropdown.change(
-            update_model_api_status,
-            inputs=[model_dropdown, run_mode_radio],
-            outputs=[model_api_status]
-        )
-        
-        run_mode_radio.change(
-            update_model_api_status,
-            inputs=[model_dropdown, run_mode_radio],
-            outputs=[model_api_status]
-        )
-        
-        # API连接测试
-        test_api_btn.click(
-            test_model_api_connection,
-            inputs=[model_dropdown, api_token_input],
-            outputs=[model_api_status]
-        )
-        
-        # 模型加载事件
-        load_btn.click(
-            load_models, 
-            inputs=[run_mode_radio, model_dropdown, controlnet_dropdown, api_token_input], 
-            outputs=[load_status]
-        )
-        
-        # 更新当前模型显示
-        model_dropdown.change(
-            lambda x: f"📦 选中模型: {MODELS.get(x, x)}",
-            inputs=[model_dropdown],
-            outputs=[current_model_display]
-        )
-        
-        # Prompt 辅助器事件
-        def get_selected_positive_tags(*tag_groups):
-            """获取所有选中的正面标签"""
-            selected_tags = []
-            for tags in tag_groups:
-                if tags:
-                    selected_tags.extend(tags)
-            return ", ".join(selected_tags) if selected_tags else ""
-        
-        def get_selected_negative_tags(*tag_groups):
-            """获取所有选中的负面标签"""
-            selected_tags = []
-            for tags in tag_groups:
-                if tags:
-                    selected_tags.extend(tags)
-            return ", ".join(selected_tags) if selected_tags else ""
-        
-        def clear_all_tags():
-            return [[] for _ in range(14)]  # 7个正面tag组 + 7个负面tag组
-        
-        # 正面词条应用到各个prompt框的事件
-        apply_positive_to_prompt1.click(
-            get_selected_positive_tags,
-            inputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags],
-            outputs=[prompt1]
-        )
-        
-        apply_positive_to_img2img.click(
-            get_selected_positive_tags,
-            inputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags],
-            outputs=[prompt_img2img]
-        )
-        
-        apply_positive_to_prompt2.click(
-            get_selected_positive_tags,
-            inputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags],
-            outputs=[prompt2]
-        )
-        
-        # 负面词条应用到各个negative prompt框的事件
-        apply_negative_to_prompt1.click(
-            get_selected_negative_tags,
-            inputs=[neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags],
-            outputs=[negative_prompt1]
-        )
-        
-        apply_negative_to_img2img.click(
-            get_selected_negative_tags,
-            inputs=[neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags],
-            outputs=[negative_prompt_img2img]
-        )
-        
-        apply_negative_to_prompt2.click(
-            get_selected_negative_tags,
-            inputs=[neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags],
-            outputs=[negative_prompt2]
-        )
-        
-        # 全局应用按钮事件（兼容性保留）
-        apply_positive_tags_btn.click(
-            get_selected_positive_tags,
-            inputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags],
-            outputs=[]
-        )
-        
-        apply_negative_tags_btn.click(
-            get_selected_negative_tags,
-            inputs=[neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags],
-            outputs=[]
-        )
-        
-        clear_tags_btn.click(
-            clear_all_tags,
-            outputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags,
-                    neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags]
-        )
-        
-        # 原有的生成事件
-        generate_btn1.click(
-            generate_image,
-            inputs=[prompt1, negative_prompt1, num_steps1, guidance_scale1, width1, height1, seed1],
-            outputs=[output_image1, output_status1]
-        )
-        
-        generate_btn_img2img.click(
-            generate_img2img,
-            inputs=[prompt_img2img, negative_prompt_img2img, input_image, strength, num_steps_img2img, guidance_scale_img2img, width_img2img, height_img2img, seed_img2img],
-            outputs=[output_image_img2img, output_status_img2img]
-        )
-        
-        generate_btn2.click(
-            generate_controlnet_image,
-            inputs=[prompt2, negative_prompt2, control_image, control_type_radio, num_steps2, guidance_scale2, controlnet_scale, width2, height2, seed2],
-            outputs=[output_image2, control_preview, output_status2]
-        )
-        
-        # 更新模型选择器
-        run_mode_radio.change(
-            update_model_choices,
-            inputs=[run_mode_radio],
-            outputs=[model_dropdown]
-        )
-        
-        return demo
-
-def query_hf_api(endpoint, payload, api_token=None):
-    """Call Hugging Face API with proxy support"""
-    headers = {"Content-Type": "application/json"}
-    if api_token:
-        headers["Authorization"] = f"Bearer {api_token}"
+# 主函数：启动Gradio应用
+if __name__ == "__main__":
+    print("🎨 启动 AI 图像生成器...")
+    print("=" * 60)
+    print("🚀 正在初始化界面...")
     
-    # 配置代理
-    proxies = {}
-    if PROXY_CONFIG["enabled"]:
-        if PROXY_CONFIG["http"]:
-            proxies["http"] = PROXY_CONFIG["http"]
-        if PROXY_CONFIG["https"]:
-            proxies["https"] = PROXY_CONFIG["https"]
+    # 创建并启动界面
+    demo = create_interface()
     
-    try:
-        # 增加超时时间并使用代理
-        response = requests.post(
-            endpoint, 
-            headers=headers, 
-            json=payload, 
-            timeout=120,  # 增加到2分钟
-            proxies=proxies if proxies else None
-        )
-        
-        if response.status_code == 200:
-            return response.content
-        elif response.status_code == 503:
-            raise Exception("Model is loading, please try again later")
-        elif response.status_code == 429:
-            raise Exception("API rate limit exceeded, please try again later")
-        elif response.status_code == 401:
-            raise Exception("Invalid or missing API token")
-        elif response.status_code == 404:
-            raise Exception("Model endpoint not found")
-        else:
-            # Ensure error message is ASCII safe
-            error_text = "Unknown API error"
-            try:
-                if response.text:
-                    # Try to get ASCII-safe error message
-                    error_text = response.text.encode('ascii', 'ignore').decode('ascii')
-                    if not error_text.strip():
-                        error_text = "API error with non-ASCII response"
-            except:
-                error_text = "API response encoding error"
-            raise Exception(f"API call failed: {response.status_code}, {error_text}")
-    except requests.exceptions.Timeout:
-        proxy_info = f" (using proxy: {proxies})" if proxies else " (no proxy)"
-        raise Exception(f"API call timeout after 120s{proxy_info}, please check network connection or proxy settings")
-    except requests.exceptions.ConnectionError as e:
-        proxy_info = f" (using proxy: {proxies})" if proxies else " (no proxy)"
-        raise Exception(f"Network connection error{proxy_info}, please check network settings or try enabling proxy")
-    except Exception as e:
-        # Ensure all error messages are ASCII safe
-        error_msg = str(e)
-        try:
-            error_msg.encode('ascii')
-        except UnicodeEncodeError:
-            error_msg = "API call error with encoding issues"
-        raise Exception(error_msg)
-
-def generate_image_api(prompt, negative_prompt="", model_id="runwayml/stable-diffusion-v1-5"):
-    """Generate image using API"""
-    endpoint = API_ENDPOINTS.get(model_id)
-    if not endpoint:
-        raise Exception(f"Model {model_id} does not support API mode")
+    print("✅ 界面初始化完成！")
+    print("🌐 正在启动服务器...")
+    print("=" * 60)
     
-    # Ensure prompt and negative_prompt are ASCII safe
-    try:
-        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
-        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
-    except:
-        safe_prompt = "safe prompt"
-        safe_negative_prompt = ""
-    
-    payload = {
-        "inputs": safe_prompt,
-        "parameters": {
-            "negative_prompt": safe_negative_prompt,
-            "num_inference_steps": 20,
-            "guidance_scale": 7.5,
-        }
-    }
-    
-    try:
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        return image, "API image generation successful!"
-    except Exception as e:
-        return None, f"API generation failed: {str(e)}"
-
-def generate_controlnet_image_api(prompt, negative_prompt, control_image, control_type):
-    """Generate ControlNet image using API"""
-    endpoint = CONTROLNET_API_ENDPOINTS.get(control_type)
-    if not endpoint:
-        raise Exception(f"ControlNet type {control_type} does not support API mode")
-    
-    # Convert control image to base64
-    import base64
-    import io
-    
-    buffered = io.BytesIO()
-    control_image.save(buffered, format="PNG")
-    control_image_b64 = base64.b64encode(buffered.getvalue()).decode()
-    
-    # Ensure prompt and negative_prompt are safe
-    try:
-        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
-        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
-    except:
-        safe_prompt = "safe prompt"
-        safe_negative_prompt = ""
-    
-    payload = {
-        "inputs": {
-            "prompt": safe_prompt,
-            "image": control_image_b64,
-            "negative_prompt": safe_negative_prompt
-        }
-    }
-    
-    try:
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        control_type_name = CONTROLNET_TYPES[control_type]['name']
-        return image, f"API mode {control_type_name} image generation successful!"
-    except Exception as e:
-        return None, f"ControlNet API generation failed: {str(e)}"
-
-def generate_img2img_api(prompt, negative_prompt, input_image, strength):
-    """Generate img2img image using API"""
-    # Note: Hugging Face public API has limited img2img support
-    # This is a basic implementation that may need adjustment
-    endpoint = API_ENDPOINTS.get("runwayml/stable-diffusion-v1-5")  # Use default model
-    if not endpoint:
-        raise Exception("img2img API mode not supported")
-    
-    # Convert input image to base64
-    import base64
-    import io
-    
-    buffered = io.BytesIO()
-    input_image.save(buffered, format="PNG")
-    input_image_b64 = base64.b64encode(buffered.getvalue()).decode()
-    
-    # Ensure prompt and negative_prompt are safe
-    try:
-        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
-        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
-    except:
-        safe_prompt = "safe prompt"
-        safe_negative_prompt = ""
-    
-    # Note: This is a simplified implementation, real img2img API may need different payload format
-    payload = {
-        "inputs": {
-            "prompt": safe_prompt,
-            "image": input_image_b64,
-            "negative_prompt": safe_negative_prompt,
-            "strength": strength
-        }
-    }
-    
-    try:
-        # Note: Since Hugging Face public API has limited img2img support, this may fail
-        # Users are recommended to use text-to-image function in API mode
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        return image, "API mode img2img image generation successful!"
-    except Exception as e:
-        return None, f"img2img API not supported, recommend using local mode or text-to-image function: {str(e)}"
-    
-    # 将输入图像转换为base64
-    import base64
-    import io
-    
-    buffered = io.BytesIO()
-    input_image.save(buffered, format="PNG")
-    input_image_b64 = base64.b64encode(buffered.getvalue()).decode()
-    
-    # 注意：这是一个简化的实现，真实的img2img API可能需要不同的payload格式
-    payload = {
-        "inputs": {
-            "prompt": prompt,
-            "image": input_image_b64,
-            "negative_prompt": negative_prompt if negative_prompt else "",
-            "strength": strength
-        }
-    }
-    
-    try:
-        # 注意：由于Hugging Face公共API对img2img支持有限，这里可能会失败
-        # 建议用户在API模式下优先使用文生图功能
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        return image, "✅ API模式 img2img 图像生成成功！"
-    except Exception as e:
-        return None, f"❌ img2img API暂不支持，建议使用本地模式或文生图功能: {str(e)}"
+    # 启动Gradio应用
+    demo.launch(
+        server_name="0.0.0.0",  # 允许外部访问
+        server_port=7861,       # 端口
+        share=False,            # 不使用公共链接
+        inbrowser=True,         # 自动打开浏览器
+        show_error=True,        # 显示错误信息
+        debug=False             # 生产模式
+    )
