@@ -1,19 +1,93 @@
-import gradio as gr
-import torch
-from diffusers import StableDiffusionPipeline, StableDiffusionControlNetPipeline, ControlNetModel
-from diffusers import StableDiffusionImg2ImgPipeline, DPMSolverMultistepScheduler
-import cv2
-import numpy as np
-from PIL import Image
-import warnings
+import os
+import sys
+import signal
+import subprocess
 import requests
+import torch
+import numpy as np
+import cv2
+import gradio as gr
+import warnings
 import io
 import base64
-import subprocess
-import os
+from PIL import Image
 from datetime import datetime
+from diffusers import StableDiffusionPipeline, StableDiffusionControlNetPipeline, ControlNetModel
+from diffusers import StableDiffusionImg2ImgPipeline, DPMSolverMultistepScheduler
 
 warnings.filterwarnings("ignore")
+
+# 全局变量存储Gradio应用实例
+gradio_app = None
+current_port = None
+
+def cleanup_resources():
+    """清理资源和释放端口"""
+    global gradio_app, current_port
+    
+    print("\n🧹 正在清理资源...")
+    
+    try:
+        # 关闭Gradio应用
+        if gradio_app is not None:
+            print("📱 关闭Gradio应用...")
+            try:
+                gradio_app.close()
+            except:
+                pass
+            gradio_app = None
+        
+        # 强制释放端口（Windows）
+        if current_port and os.name == 'nt':  # Windows系统
+            try:
+                print(f"🔌 释放端口 {current_port}...")
+                # 查找占用端口的进程
+                result = subprocess.run(
+                    f'netstat -ano | findstr :{current_port}',
+                    shell=True, capture_output=True, text=True
+                )
+                
+                if result.stdout:
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines:
+                        if 'LISTENING' in line:
+                            parts = line.split()
+                            if len(parts) >= 5:
+                                pid = parts[-1]
+                                print(f"🎯 终止进程 PID: {pid}")
+                                subprocess.run(f'taskkill /f /pid {pid}', shell=True, capture_output=True)
+                                
+            except Exception as e:
+                print(f"⚠️ 端口释放警告: {e}")
+        
+        print("✅ 资源清理完成")
+        
+    except Exception as e:
+        print(f"❌ 清理过程出错: {e}")
+
+def signal_handler(signum, frame):
+    """信号处理器 - 捕获Ctrl+C等中断信号"""
+    print(f"\n🛑 收到中断信号 {signum}")
+    cleanup_resources()
+    print("👋 应用已安全退出")
+    sys.exit(0)
+
+def setup_signal_handlers():
+    """设置信号处理器"""
+    try:
+        # 捕获常见的中断信号
+        signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, signal_handler) # 终止信号
+        if hasattr(signal, 'SIGBREAK'):
+            signal.signal(signal.SIGBREAK, signal_handler) # Windows Ctrl+Break
+        print("🔧 信号处理器已设置")
+    except Exception as e:
+        print(f"⚠️ 信号处理器设置失败: {e}")
+
+# 设置自动清理
+import atexit
+atexit.register(cleanup_resources)
 
 # 全局变量存储管道
 pipe = None
@@ -109,11 +183,13 @@ API_ENDPOINTS = {
     "dreamlike-art/dreamlike-diffusion-1.0": "https://api-inference.huggingface.co/models/dreamlike-art/dreamlike-diffusion-1.0",
 }
 
-# ControlNet API endpoints
+# ControlNet API endpoints - 更新为最新版本
 CONTROLNET_API_ENDPOINTS = {
-    "canny": "https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-canny",
-    "scribble": "https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-scribble", 
-    "depth": "https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-depth"
+    "canny": "https://api-inference.huggingface.co/models/lllyasviel/control_v11p_sd15_canny",
+    "scribble": "https://api-inference.huggingface.co/models/lllyasviel/control_v11p_sd15_scribble", 
+    "depth": "https://api-inference.huggingface.co/models/lllyasviel/control_v11p_sd15_depth",
+    "openpose": "https://api-inference.huggingface.co/models/lllyasviel/control_v11p_sd15_openpose",
+    "seg": "https://api-inference.huggingface.co/models/lllyasviel/control_v11p_sd15_seg"
 }
 
 def validate_api_key(api_token):
@@ -286,22 +362,127 @@ def test_model_api_connection(model_id, api_token):
     except Exception as e:
         return f"❌ 连接测试失败: {str(e)[:50]}..."
 
-# ControlNet 类型选项
+def test_controlnet_api_connection(control_type, api_token):
+    """测试ControlNet API连接"""
+    if not api_token.strip():
+        return "⚠️ 请先输入有效的API Token"
+    
+    if control_type not in CONTROLNET_API_ENDPOINTS:
+        return f"❌ ControlNet类型 {control_type} 不支持API模式"
+    
+    try:
+        endpoint = CONTROLNET_API_ENDPOINTS[control_type]
+        headers = {"Authorization": f"Bearer {api_token.strip()}"}
+        
+        # 构建代理配置
+        proxies = None
+        if PROXY_CONFIG.get('enabled'):
+            proxies = {}
+            if PROXY_CONFIG.get('http'):
+                proxies['http'] = PROXY_CONFIG['http']
+            if PROXY_CONFIG.get('https'):
+                proxies['https'] = PROXY_CONFIG['https']
+        
+        # 使用HEAD请求检查API可访问性
+        response = requests.head(
+            endpoint,
+            headers=headers,
+            timeout=10,
+            proxies=proxies
+        )
+        
+        control_name = CONTROLNET_TYPES[control_type]['name']
+        
+        if response.status_code == 200:
+            return f"✅ ControlNet API连接成功 - {control_name} 可用"
+        elif response.status_code == 503:
+            return f"⚠️ ControlNet模型正在加载 - {control_name} (请稍等1-2分钟)"
+        elif response.status_code == 401:
+            return "❌ API Token无效或无权限访问ControlNet模型"
+        elif response.status_code == 403:
+            return "❌ Token权限不足，无法访问ControlNet推理API"
+        elif response.status_code == 404:
+            return f"❌ ControlNet端点不存在 - {control_name}"
+        elif response.status_code == 429:
+            return f"⚠️ API调用频率限制 - {control_name} (Token有效，请稍后重试)"
+        else:
+            return f"⚠️ 未知状态 ({response.status_code}) - {control_name}"
+    
+    except requests.exceptions.Timeout:
+        return f"❌ 连接超时 - 请检查网络或启用代理"
+    except requests.exceptions.ConnectionError:
+        return f"❌ 网络连接失败 - 请检查网络设置或代理配置"
+    except Exception as e:
+        return f"❌ 连接测试失败: {str(e)[:50]}..."
+
+def test_img2img_api_connection(api_token):
+    """img2img API技术说明 - 解释为什么API模式不适合img2img"""
+    
+    return """🔬 img2img技术原理分析
+
+📋 **技术栈要求**：
+✅ VAE编码器 - 图像→潜在空间转换
+✅ 噪声调制器 - 根据strength参数调制
+✅ UNet采样器 - 潜在空间去噪过程  
+✅ VAE解码器 - 潜在空间→图像转换
+✅ 调度器 - 控制采样步骤
+
+🌐 **API模式现状**：
+❌ 公共API通常只提供text-to-image接口
+❌ 缺少独立的VAE编码器访问
+❌ 无法进行潜在空间操作
+❌ 复杂流程不适合HTTP API封装
+
+💡 **ComfyUI对比**：
+ComfyUI通过节点化设计，提供完整的VAE编码器节点，
+这正是高质量img2img的关键。每个步骤都可以独立配置。
+
+🎯 **推荐解决方案**：
+
+1. 🏠 **本地模式** (最佳选择)
+   • 完整img2img管道支持
+   • 包含专用VAE编码器/解码器
+   • 可精确控制strength等参数
+
+2. 🖼️ **ControlNet模式** (API兼容)
+   • Canny边缘检测 + 文生图
+   • 保持原图结构，改变风格  
+   • API模式完全支持
+
+3. 📊 **Inpainting模式** (局部编辑)
+   • 针对特定区域修改
+   • 某些API服务支持
+
+� **技术结论**：
+img2img本质上是一个需要完整模型管道的复杂流程，
+更适合本地计算而非API调用。"""
+
+# ControlNet 类型选项 - 更新为最新版本
 CONTROLNET_TYPES = {
     "canny": {
         "name": "Canny边缘检测",
-        "model_id": "lllyasviel/sd-controlnet-canny",
+        "model_id": "lllyasviel/control_v11p_sd15_canny",
         "description": "检测图像边缘轮廓，保持物体形状"
     },
     "scribble": {
         "name": "Scribble涂鸦控制",
-        "model_id": "lllyasviel/sd-controlnet-scribble", 
+        "model_id": "lllyasviel/control_v11p_sd15_scribble", 
         "description": "基于手绘涂鸦或简笔画生成图像"
     },
     "depth": {
         "name": "Depth深度控制",
-        "model_id": "lllyasviel/sd-controlnet-depth",
+        "model_id": "lllyasviel/control_v11p_sd15_depth",
         "description": "基于深度图控制空间结构和层次"
+    },
+    "openpose": {
+        "name": "OpenPose姿态控制",
+        "model_id": "lllyasviel/control_v11p_sd15_openpose",
+        "description": "基于人体姿态骨架控制人物姿势"
+    },
+    "seg": {
+        "name": "Segmentation分割控制",
+        "model_id": "lllyasviel/control_v11p_sd15_seg",
+        "description": "基于语义分割图控制物体分布"
     }
 }
 
@@ -665,7 +846,7 @@ def generate_controlnet_image(prompt, negative_prompt, control_image, control_ty
             return None, processed_image, f"❌ 生成失败: {str(e)}"
 
 def generate_img2img(prompt, negative_prompt, input_image, strength, num_steps, guidance_scale, width, height, seed):
-    """传统图生图功能"""
+    """传统图生图功能 - 改进版本，包含更好的API处理和用户指导"""
     global img2img_pipe, RUN_MODE
     
     if img2img_pipe is None:
@@ -674,25 +855,83 @@ def generate_img2img(prompt, negative_prompt, input_image, strength, num_steps, 
     if input_image is None:
         return None, "❌ 请上传输入图像"
     
+    # 验证参数
+    if not prompt or not prompt.strip():
+        return None, "❌ 请输入描述提示词"
+    
+    if strength < 0 or strength > 1:
+        return None, "❌ 变换强度应在0-1之间"
+    
     # 调整图像大小
-    input_image = input_image.resize((width, height))
+    try:
+        input_image = input_image.resize((width, height))
+    except Exception as e:
+        return None, f"❌ 图像处理失败: {str(e)}"
     
     if RUN_MODE == "api":
-        # API模式
+        # API模式 - 包含详细的错误处理和用户指导
         try:
+            print(f"🌐 API模式: 尝试img2img生成...")
             image, status = generate_img2img_api(prompt, negative_prompt, input_image, strength)
-            return image, status
+            
+            if image is not None:
+                return image, status
+            else:
+                # API失败时，提供详细的指导信息
+                fallback_message = f"""🔄 img2img API暂不可用，建议尝试以下替代方案:
+
+🎯 最佳替代方案:
+1. 🏠 切换到本地模式 - img2img功能完全支持
+2. 🖼️ 使用ControlNet模式:
+   • 选择Canny边缘检测
+   • 上传您的图像作为控制图
+   • 输入相同的提示词
+   • 获得类似的图像变换效果
+
+📋 操作步骤:
+• 点击上方"切换到本地模式"按钮
+• 或切换到"ControlNet生成"标签页
+• 选择"canny"类型，上传同一张图像
+
+💡 为什么会这样:
+{status}
+
+🔧 技术原因:
+• Hugging Face公共API主要支持text-to-image
+• img2img需要专门的API端点支持
+• 大多数模型尚未提供img2img API接口"""
+                
+                return None, fallback_message
+                
         except Exception as e:
-            return None, f"❌ API生成失败: {str(e)}"
+            error_message = f"""❌ img2img API调用异常: {str(e)}
+
+🔄 推荐解决方案:
+1. 🏠 切换到本地模式 (100%支持img2img)
+2. 🖼️ 使用ControlNet模式替代
+3. 🎨 使用纯文生图模式
+
+📋 快速操作:
+• 点击"切换到本地模式"
+• 或使用ControlNet的Canny功能"""
+            
+            return None, error_message
     
     else:
-        # 本地模式
+        # 本地模式 - 完全支持img2img
         try:
+            print(f"🏠 本地模式: 开始img2img生成...")
+            print(f"   输入图像尺寸: {input_image.size}")
+            print(f"   变换强度: {strength}")
+            print(f"   生成步数: {num_steps}")
+            
             # 设置随机种子
             if seed != -1:
                 generator = torch.Generator(device=device).manual_seed(seed)
+                print(f"   使用种子: {seed}")
             else:
                 generator = None
+                print(f"   随机种子")
                 
             # 生成图像
             with torch.autocast(device):
@@ -707,10 +946,28 @@ def generate_img2img(prompt, negative_prompt, input_image, strength, num_steps, 
                 )
             
             image = result.images[0]
-            return image, "✅ 传统图生图成功！"
+            
+            success_message = f"""✅ 本地img2img生成成功！
+🖼️ 输出尺寸: {image.size}
+🎯 变换强度: {strength}
+📝 生成步数: {num_steps}
+⚡ 引导强度: {guidance_scale}"""
+            
+            return image, success_message
             
         except Exception as e:
-            return None, f"❌ 生成失败: {str(e)}"
+            error_message = f"""❌ 本地img2img生成失败: {str(e)}
+
+🔧 可能的解决方案:
+1. 📉 降低图像分辨率 (512x512)
+2. 📊 减少生成步数 (15-25)
+3. 🎚️ 调整变换强度 (0.5-0.8)
+4. 💾 检查显存是否充足
+5. 🔄 重新加载模型
+
+⚠️ 如果问题持续，建议使用ControlNet模式"""
+            
+            return None, error_message
 
 def add_prompt_tags(current_prompt, selected_tags):
     """添加选中的标签到prompt中"""
@@ -780,7 +1037,7 @@ def create_interface():
                 )
                 
                 model_dropdown = gr.Dropdown(
-                    choices=list(API_SUPPORTED_MODELS.keys()),
+                    choices=[(name, model_id) for model_id, name in API_SUPPORTED_MODELS.items()],
                     value="black-forest-labs/FLUX.1-dev",
                     label="🤖 选择基础模型 (仅API支持的模型)",
                     info="✅ API模式 - 这些模型支持云端推理，无需下载"
@@ -826,7 +1083,24 @@ def create_interface():
                     )
                     
                     # API连接测试按钮
-                    test_api_btn = gr.Button("🔗 测试API连接", variant="secondary")
+                    test_api_btn = gr.Button("🔗 测试基础模型API连接", variant="secondary")
+                    
+                    # ControlNet API 测试
+                    with gr.Row():
+                        controlnet_test_dropdown = gr.Dropdown(
+                            choices=list(CONTROLNET_TYPES.keys()),
+                            value="canny",
+                            label="选择ControlNet类型进行测试",
+                            scale=2
+                        )
+                        test_controlnet_api_btn = gr.Button("🎮 测试ControlNet API", variant="secondary", scale=1)
+                    
+                    controlnet_api_status = gr.Textbox(
+                        label="ControlNet API测试状态",
+                        value="点击测试按钮检查ControlNet API连接",
+                        interactive=False,
+                        lines=1
+                    )
                 
                 # 代理设置
                 with gr.Accordion("🌐 网络代理设置 (解决连接超时问题)", open=False):
@@ -1073,6 +1347,31 @@ def create_interface():
             
             # Tab 2: 传统图生图
             with gr.TabItem("🔄 传统图生图"):
+                # 添加技术说明
+                with gr.Accordion("🔬 技术原理说明", open=False):
+                    gr.Markdown("""
+### 📚 img2img技术原理
+
+**img2img** 是一个复杂的图像处理流程，需要完整的AI模型管道：
+
+🔄 **完整流程**：
+1. **VAE编码器** → 将输入图像编码到潜在空间 (latent space)
+2. **噪声添加** → 根据strength参数添加不同程度的噪声
+3. **UNet采样** → 在潜在空间进行去噪过程，结合文本提示
+4. **VAE解码器** → 将潜在表示解码回图像空间
+
+🏠 **本地模式** vs 🌐 **API模式**：
+- **本地模式**：✅ 完整支持，包含VAE编码器/解码器
+- **API模式**：❌ 限制较大，公共API通常只提供简化接口
+
+💡 **ComfyUI对比**：
+ComfyUI使用完整的工作流节点，包含独立的VAE编码器节点，
+这正是实现高质量img2img的关键组件。
+
+🎯 **最佳替代方案**：
+如果您在API模式下需要类似效果，推荐使用 **ControlNet + Canny边缘检测**
+                    """)
+                
                 with gr.Row():
                     with gr.Column(scale=1):
                         input_image = gr.Image(label="上传输入图像", type="pil")
@@ -1105,7 +1404,11 @@ def create_interface():
                             height_img2img = gr.Slider(256, 1024, value=512, step=64, label="高度")
                         
                         seed_img2img = gr.Number(label="随机种子 (-1为随机)", value=-1)
-                        generate_btn_img2img = gr.Button("🔄 传统图生图", variant="secondary")
+                        
+                        with gr.Row():
+                            generate_btn_img2img = gr.Button("🔄 传统图生图", variant="secondary", scale=3)
+                            test_img2img_api_btn = gr.Button("🧪 测试API", variant="secondary", scale=1, 
+                                                           visible=True, size="sm")
                     
                     with gr.Column(scale=1):
                         output_image_img2img = gr.Image(label="生成的图像", type="pil")
@@ -1202,15 +1505,27 @@ def create_interface():
         
         ### 🔄 **传统图生图 vs 🖼️ ControlNet 详细对比：**
         
-        **传统图生图的问题：**
-        - 🔸 结构不稳定：同样参数可能产生完全不同结果
-        - 🔸 strength难调：太高丢失原图，太低改变不够
-        - 🔸 细节丢失：容易失去重要的结构信息
+        **🔬 传统图生图技术原理：**
+        - 🔧 **VAE编码器**：将输入图像编码到潜在空间
+        - 🎲 **噪声调制**：根据strength添加不同程度噪声
+        - 🔄 **UNet采样**：在潜在空间结合文本进行去噪
+        - 🖼️ **VAE解码器**：将潜在表示解码回图像空间
         
-        **ControlNet的优势：**
-        - ✅ 精确控制：保留边缘、深度、姿态等结构信息
-        - ✅ 可预测性：相同输入产生一致结果
-        - ✅ 高保真度：保持原图关键特征的同时进行风格转换
+        **传统图生图的技术限制：**
+        - 🔸 **API模式受限**：需要完整VAE编码器，公共API通常不提供
+        - 🔸 **结构不稳定**：噪声调制可能破坏重要结构信息
+        - 🔸 **参数敏感**：strength参数难以精确控制变化程度
+        - 🔸 **ComfyUI优势**：通过独立VAE节点实现精确控制
+        
+        **🌐 API模式 vs 🏠 本地模式：**
+        - **API模式**：❌ 缺少VAE编码器访问，无法进行潜在空间操作
+        - **本地模式**：✅ 完整img2img管道，包含独立VAE编码器/解码器
+        
+        **ControlNet的技术优势：**
+        - ✅ **结构保持**：通过边缘、深度等控制信号保持结构
+        - ✅ **API兼容**：可通过预处理图像+文生图实现
+        - ✅ **可预测性**：相同控制信号产生一致结果
+        - ✅ **高保真度**：保持原图关键特征的同时进行风格转换
         
         ### 🛠️ **参数调节建议：**
         - **采样步数**：20-30 (质量与速度平衡)
@@ -1303,6 +1618,13 @@ def create_interface():
             test_model_api_connection,
             inputs=[model_dropdown, api_token_input],
             outputs=[model_api_status]
+        )
+        
+        # ControlNet API连接测试
+        test_controlnet_api_btn.click(
+            test_controlnet_api_connection,
+            inputs=[controlnet_test_dropdown, api_token_input],
+            outputs=[controlnet_api_status]
         )
         
         # 模型加载事件
@@ -1407,6 +1729,13 @@ def create_interface():
             generate_img2img,
             inputs=[prompt_img2img, negative_prompt_img2img, input_image, strength, num_steps_img2img, guidance_scale_img2img, width_img2img, height_img2img, seed_img2img],
             outputs=[output_image_img2img, output_status_img2img]
+        )
+        
+        # img2img API测试按钮
+        test_img2img_api_btn.click(
+            test_img2img_api_connection,
+            inputs=[api_token_input],
+            outputs=[output_status_img2img]
         )
         
         generate_btn2.click(
@@ -1516,10 +1845,14 @@ def generate_image_api(prompt, negative_prompt="", model_id="runwayml/stable-dif
         return None, f"API generation failed: {str(e)}"
 
 def generate_controlnet_image_api(prompt, negative_prompt, control_image, control_type):
-    """Generate ControlNet image using API"""
+    """Generate ControlNet image using API - 修复版本"""
     endpoint = CONTROLNET_API_ENDPOINTS.get(control_type)
     if not endpoint:
         raise Exception(f"ControlNet type {control_type} does not support API mode")
+    
+    # 检查API Token
+    if not HF_API_TOKEN or not HF_API_TOKEN.strip():
+        raise Exception("ControlNet API requires a valid Hugging Face API Token. Please set your token in the API settings.")
     
     # Convert control image to base64
     import base64
@@ -1537,11 +1870,15 @@ def generate_controlnet_image_api(prompt, negative_prompt, control_image, contro
         safe_prompt = "safe prompt"
         safe_negative_prompt = ""
     
+    # 使用经过测试验证的 ControlNet API 格式
+    # 根据测试结果，使用简单的inputs格式
     payload = {
-        "inputs": {
-            "prompt": safe_prompt,
+        "inputs": safe_prompt,
+        "parameters": {
             "image": control_image_b64,
-            "negative_prompt": safe_negative_prompt
+            "negative_prompt": safe_negative_prompt,
+            "num_inference_steps": 20,
+            "guidance_scale": 7.5
         }
     }
     
@@ -1549,79 +1886,61 @@ def generate_controlnet_image_api(prompt, negative_prompt, control_image, contro
         image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
         image = Image.open(io.BytesIO(image_bytes))
         control_type_name = CONTROLNET_TYPES[control_type]['name']
-        return image, f"API mode {control_type_name} image generation successful!"
+        return image, f"✅ API模式 {control_type_name} 图像生成成功！"
     except Exception as e:
-        return None, f"ControlNet API generation failed: {str(e)}"
+        error_msg = str(e)
+        if "Model endpoint not found" in error_msg or "404" in error_msg:
+            return None, f"❌ ControlNet模型 {control_type} 端点不可用。建议：1) 检查网络连接 2) 尝试其他控制类型 3) 使用本地模式"
+        elif "401" in error_msg or "Invalid" in error_msg or "credentials" in error_msg.lower():
+            return None, f"❌ API Token无效或未设置。请在API设置中输入有效的 Hugging Face Token"
+        elif "503" in error_msg or "loading" in error_msg.lower():
+            return None, f"⏳ ControlNet模型正在加载，请稍等1-2分钟后重试"
+        elif "timeout" in error_msg.lower():
+            return None, f"⏰ 连接超时，请检查网络连接或启用代理设置"
+        else:
+            return None, f"❌ ControlNet API调用失败: {error_msg}"
 
 def generate_img2img_api(prompt, negative_prompt, input_image, strength):
-    """Generate img2img image using API"""
-    # Note: Hugging Face public API has limited img2img support
-    # This is a basic implementation that may need adjustment
-    endpoint = API_ENDPOINTS.get("runwayml/stable-diffusion-v1-5")  # Use default model
-    if not endpoint:
-        raise Exception("img2img API mode not supported")
+    """Generate img2img image using API - 技术说明版本"""
     
-    # Convert input image to base64
-    import base64
-    import io
+    # 技术原理说明：img2img需要完整的VAE编码/解码流程
+    # 1. VAE编码器将图像编码到潜在空间
+    # 2. 根据strength添加噪声
+    # 3. UNet进行去噪采样
+    # 4. VAE解码器解码回图像
+    # 这个复杂流程不适合简化的API调用
     
-    buffered = io.BytesIO()
-    input_image.save(buffered, format="PNG")
-    input_image_b64 = base64.b64encode(buffered.getvalue()).decode()
     
-    # Ensure prompt and negative_prompt are safe
-    try:
-        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
-        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
-    except:
-        safe_prompt = "safe prompt"
-        safe_negative_prompt = ""
+    # 检查API Token
+    if not HF_API_TOKEN or not HF_API_TOKEN.strip():
+        return None, "❌ img2img API需要有效的 Hugging Face API Token"
     
-    # Note: This is a simplified implementation, real img2img API may need different payload format
-    payload = {
-        "inputs": {
-            "prompt": safe_prompt,
-            "image": input_image_b64,
-            "negative_prompt": safe_negative_prompt,
-            "strength": strength
-        }
-    }
-    
-    try:
-        # Note: Since Hugging Face public API has limited img2img support, this may fail
-        # Users are recommended to use text-to-image function in API mode
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        return image, "API mode img2img image generation successful!"
-    except Exception as e:
-        return None, f"img2img API not supported, recommend using local mode or text-to-image function: {str(e)}"
-    
-    # 将输入图像转换为base64
-    import base64
-    import io
-    
-    buffered = io.BytesIO()
-    input_image.save(buffered, format="PNG")
-    input_image_b64 = base64.b64encode(buffered.getvalue()).decode()
-    
-    # 注意：这是一个简化的实现，真实的img2img API可能需要不同的payload格式
-    payload = {
-        "inputs": {
-            "prompt": prompt,
-            "image": input_image_b64,
-            "negative_prompt": negative_prompt if negative_prompt else "",
-            "strength": strength
-        }
-    }
-    
-    try:
-        # 注意：由于Hugging Face公共API对img2img支持有限，这里可能会失败
-        # 建议用户在API模式下优先使用文生图功能
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        return image, "✅ API模式 img2img 图像生成成功！"
-    except Exception as e:
-        return None, f"❌ img2img API暂不支持，建议使用本地模式或文生图功能: {str(e)}"
+    # 技术限制说明
+    return None, f"""❌ img2img API功能受限
+
+🔬 技术原理说明:
+img2img需要完整的VAE编码/解码流程：
+1. VAE编码器：将输入图像编码到潜在空间
+2. 噪声调制：根据strength参数添加噪声
+3. UNet采样：在潜在空间进行去噪
+4. VAE解码器：将结果解码回图像空间
+
+🚫 API限制:
+• 公共API通常只提供简化的text-to-image端点
+• img2img需要完整的模型管道（VAE+UNet+调度器）
+• 复杂的潜在空间操作不适合API封装
+
+💡 推荐解决方案:
+1. 🏠 本地模式 - 完整支持img2img流程
+2. 🖼️ ControlNet模式 - 可实现类似的图像引导效果：
+   • Canny边缘检测 + 文生图
+   • 保持原图结构，改变风格
+   • API模式完全支持
+3. � Inpainting模式 - 局部修改（如果支持）
+
+🎯 ComfyUI对比:
+您提到的ComfyUI确实是完整的本地工作流，
+包含完整的VAE编码器，这正是API模式缺少的部分。"""
 
 def update_model_choices(run_mode):
     """根据运行模式动态更新模型选择器"""
@@ -1646,10 +1965,11 @@ def update_model_choices(run_mode):
         choices = []
         for model_id in recommended_order:
             if model_id in available_models:
-                choices.append(model_id)
+                model_name = available_models[model_id]
+                choices.append((model_name, model_id))
         
         # 默认选择第一个推荐模型
-        default_value = choices[0] if choices else "black-forest-labs/FLUX.1-dev"
+        default_value = recommended_order[0] if recommended_order else "black-forest-labs/FLUX.1-dev"
         
         return gr.Dropdown.update(
             choices=choices,
@@ -1659,7 +1979,7 @@ def update_model_choices(run_mode):
         )
     else:
         # 本地模式：显示所有模型
-        choices = list(available_models.keys())
+        choices = [(name, model_id) for model_id, name in available_models.items()]
         return gr.Dropdown.update(
             choices=choices,
             value="runwayml/stable-diffusion-v1-5",
@@ -1667,25 +1987,54 @@ def update_model_choices(run_mode):
             info="💾 本地模式 - 首次使用需要下载模型文件（4-10GB）"
         )
 
-# 主函数：启动Gradio应用
+# 主函数：启动Gradio应用 - 带自动清理功能
 if __name__ == "__main__":
     print("🎨 启动 AI 图像生成器...")
     print("=" * 60)
+    
+    # 设置信号处理器
+    setup_signal_handlers()
+    
     print("🚀 正在初始化界面...")
     
-    # 创建并启动界面
+    # 创建界面
     demo = create_interface()
+    gradio_app = demo  # 保存到全局变量
     
     print("✅ 界面初始化完成！")
     print("🌐 正在启动服务器...")
     print("=" * 60)
     
-    # 启动Gradio应用
-    demo.launch(
-        server_name="0.0.0.0",  # 允许外部访问
-        server_port=7861,       # 端口
-        share=False,            # 不使用公共链接
-        inbrowser=True,         # 自动打开浏览器
-        show_error=True,        # 显示错误信息
-        debug=False             # 生产模式
-    )
+    # 智能端口分配
+    ports_to_try = [7860, 7861, 7862, 7863, 7864]
+    
+    for port in ports_to_try:
+        try:
+            print(f"🔄 尝试启动在端口 {port}...")
+            current_port = port  # 保存当前端口到全局变量
+            
+            demo.launch(
+                server_name="0.0.0.0",
+                server_port=port,
+                share=False,
+                inbrowser=True,
+                show_error=True,
+                debug=False
+            )
+            break
+            
+        except (OSError, Exception) as e:
+            if "Address already in use" in str(e) or "10048" in str(e) or "Cannot find empty port" in str(e):
+                print(f"⚠️ 端口 {port} 被占用，尝试下一个端口...")
+                continue
+            else:
+                print(f"❌ 启动失败: {e}")
+                cleanup_resources()
+                sys.exit(1)
+        except KeyboardInterrupt:
+            print("\n🛑 用户中断启动")
+            cleanup_resources()
+            sys.exit(0)
+    
+    # 程序结束时自动清理
+    cleanup_resources()

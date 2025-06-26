@@ -1,0 +1,20 @@
+{
+  "runwayml/stable-diffusion-v1-5": {
+    "Stability AI 风格": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}",
+    "Diffusers 标准格式": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}",
+    "简化格式": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}",
+    "兼容性格式": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}"
+  },
+  "stabilityai/stable-diffusion-2-1": {
+    "Stability AI 风格": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}",
+    "Diffusers 标准格式": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}",
+    "简化格式": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}",
+    "兼容性格式": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}"
+  },
+  "stabilityai/stable-diffusion-xl-base-1.0": {
+    "Stability AI 风格": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}",
+    "Diffusers 标准格式": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}",
+    "简化格式": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}",
+    "兼容性格式": "HTTP_401: {\"error\":\"Invalid credentials in Authorization header\"}"
+  }
+}
