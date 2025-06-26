@@ -91,12 +91,22 @@ def auto_push_to_github():
     except Exception as e:
         return f"❌ 推送过程中发生错误: {str(e)}"
 
-# API模式下的推理端点
+# API模式下的推理端点 - 官方支持的热门模型
 API_ENDPOINTS = {
+    # 最新推荐模型 (官方文档推荐)
+    "black-forest-labs/FLUX.1-dev": "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev",
+    "black-forest-labs/FLUX.1-schnell": "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+    "stabilityai/stable-diffusion-xl-base-1.0": "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0",
+    "stabilityai/stable-diffusion-3.5-large": "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-3.5-large",
+    "stabilityai/stable-diffusion-3-medium-diffusers": "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-3-medium-diffusers",
+    "latent-consistency/lcm-lora-sdxl": "https://api-inference.huggingface.co/models/latent-consistency/lcm-lora-sdxl",
+    "Kwai-Kolors/Kolors": "https://api-inference.huggingface.co/models/Kwai-Kolors/Kolors",
+    
+    # 经典稳定的API模型
     "runwayml/stable-diffusion-v1-5": "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5",
     "stabilityai/stable-diffusion-2-1": "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-2-1",
-    "dreamlike-art/dreamlike-diffusion-1.0": "https://api-inference.huggingface.co/models/dreamlike-art/dreamlike-diffusion-1.0",
     "prompthero/openjourney": "https://api-inference.huggingface.co/models/prompthero/openjourney",
+    "dreamlike-art/dreamlike-diffusion-1.0": "https://api-inference.huggingface.co/models/dreamlike-art/dreamlike-diffusion-1.0",
 }
 
 # ControlNet API endpoints
@@ -105,6 +115,176 @@ CONTROLNET_API_ENDPOINTS = {
     "scribble": "https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-scribble", 
     "depth": "https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-depth"
 }
+
+def validate_api_key(api_token):
+    """验证API Key的有效性 - 改进版本"""
+    if not api_token.strip():
+        return "⚠️ 请输入有效的API Token"
+    
+    token = api_token.strip()
+    
+    # 基本格式检查
+    if not token.startswith('hf_'):
+        return "❌ Token格式错误：应该以 'hf_' 开头"
+    
+    if len(token) < 30:
+        return "❌ Token长度过短：请检查是否完整复制"
+    
+    try:
+        # 构建代理配置
+        proxies = None
+        if PROXY_CONFIG.get('enabled'):
+            proxies = {}
+            if PROXY_CONFIG.get('http'):
+                proxies['http'] = PROXY_CONFIG['http']
+            if PROXY_CONFIG.get('https'):
+                proxies['https'] = PROXY_CONFIG['https']
+        
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        # 方法1: 尝试访问用户信息API (使用正确的v2端点)
+        try:
+            response = requests.get(
+                "https://huggingface.co/api/whoami-v2",
+                headers=headers,
+                timeout=15,
+                proxies=proxies
+            )
+            
+            if response.status_code == 200:
+                try:
+                    user_info = response.json()
+                    username = user_info.get('name', 'User')
+                    return f"✅ Token验证成功 - 用户: {username}"
+                except:
+                    return f"✅ Token验证成功 - API响应正常"
+            elif response.status_code == 401:
+                return "❌ Token无效：请检查Token是否正确或已过期"
+            elif response.status_code == 403:
+                return "⚠️ Token权限受限，但可能可用于基础API调用"
+            else:
+                # 如果whoami失败，继续尝试其他验证方法
+                pass
+                
+        except requests.exceptions.RequestException:
+            # whoami API失败，尝试其他方法
+            pass
+        
+        # 方法2: 尝试访问模型列表API（更宽松的验证）
+        try:
+            response = requests.get(
+                "https://huggingface.co/api/models",
+                headers=headers,
+                timeout=15,
+                proxies=proxies,
+                params={"limit": 1}  # 只请求1个模型，减少流量
+            )
+            
+            if response.status_code == 200:
+                return f"✅ Token基本有效 - 可访问模型API"
+            elif response.status_code == 401:
+                return "❌ Token无效或已过期"
+            elif response.status_code == 403:
+                return "⚠️ Token权限不足，但格式正确"
+            else:
+                return f"⚠️ API返回状态 {response.status_code}，请检查Token权限"
+                
+        except requests.exceptions.RequestException:
+            pass
+        
+        # 方法3: 最后尝试简单的推理API检查（HEAD请求）
+        try:
+            test_endpoint = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5"
+            response = requests.head(
+                test_endpoint,
+                headers=headers,
+                timeout=10,
+                proxies=proxies
+            )
+            
+            if response.status_code in [200, 503]:  # 503表示模型在加载
+                return f"✅ Token可用于推理API"
+            elif response.status_code == 401:
+                return "❌ Token无效，无法访问推理API"
+            elif response.status_code == 403:
+                return "❌ Token权限不足，无法访问推理API"
+            else:
+                return f"⚠️ 推理API返回状态 {response.status_code}，Token可能有效"
+                
+        except requests.exceptions.Timeout:
+            return f"⚠️ 网络超时，Token格式正确但无法验证连接"
+        except requests.exceptions.ConnectionError:
+            return f"⚠️ 网络连接失败，请检查网络设置或代理配置"
+            
+    except Exception as e:
+        return f"❌ 验证过程出错: {str(e)[:50]}..."
+    
+    # 如果所有API调用都失败，但Token格式正确
+    return f"⚠️ 无法验证Token有效性，但格式正确。可能是网络问题或API服务异常"
+
+def check_model_api_support(model_id, run_mode):
+    """检查模型是否支持API模式"""
+    if run_mode != "api":
+        return f"✅ 本地模式 - 支持所有模型"
+    
+    if model_id in API_ENDPOINTS:
+        return f"✅ API模式支持 - {MODELS.get(model_id, model_id)}"
+    else:
+        available_models = ", ".join([MODELS.get(m, m) for m in API_ENDPOINTS.keys()])
+        return f"❌ API模式不支持此模型\n💡 支持的模型: {available_models}"
+
+def test_model_api_connection(model_id, api_token):
+    """测试模型API连接 - 改进版本"""
+    if not api_token.strip():
+        return "⚠️ 请先输入有效的API Token"
+    
+    if model_id not in API_ENDPOINTS:
+        return f"❌ 模型 {model_id} 不支持API模式"
+    
+    try:
+        endpoint = API_ENDPOINTS[model_id]
+        headers = {"Authorization": f"Bearer {api_token.strip()}"}
+        
+        # 构建代理配置
+        proxies = None
+        if PROXY_CONFIG.get('enabled'):
+            proxies = {}
+            if PROXY_CONFIG.get('http'):
+                proxies['http'] = PROXY_CONFIG['http']
+            if PROXY_CONFIG.get('https'):
+                proxies['https'] = PROXY_CONFIG['https']
+        
+        # 使用HEAD请求检查API可访问性（不实际生成图片）
+        response = requests.head(
+            endpoint,
+            headers=headers,
+            timeout=10,
+            proxies=proxies
+        )
+        
+        model_name = MODELS.get(model_id, model_id)
+        
+        if response.status_code == 200:
+            return f"✅ 模型API连接成功 - {model_name} 可用"
+        elif response.status_code == 503:
+            return f"⚠️ 模型正在加载中 - {model_name} (请稍后重试)"
+        elif response.status_code == 401:
+            return "❌ API Token无效或无权限访问此模型"
+        elif response.status_code == 403:
+            return "❌ Token权限不足，无法访问推理API"
+        elif response.status_code == 404:
+            return f"❌ 模型端点不存在 - {model_name}"
+        elif response.status_code == 429:
+            return f"⚠️ API调用频率限制 - {model_name} (Token有效)"
+        else:
+            return f"⚠️ API返回状态码 {response.status_code} - 连接可能有问题"
+    
+    except requests.exceptions.Timeout:
+        return f"❌ 连接超时 - 请检查网络或启用代理"
+    except requests.exceptions.ConnectionError:
+        return f"❌ 网络连接失败 - 请检查网络设置或代理配置"
+    except Exception as e:
+        return f"❌ 连接测试失败: {str(e)[:50]}..."
 
 # ControlNet 类型选项
 CONTROLNET_TYPES = {
@@ -125,17 +305,42 @@ CONTROLNET_TYPES = {
     }
 }
 
-# 预定义模型列表
-MODELS = {
-    "runwayml/stable-diffusion-v1-5": "Stable Diffusion v1.5 (标准模型)",
+# 预定义模型列表 (分为API支持和仅本地支持)
+API_SUPPORTED_MODELS = {
+    # 最新推荐模型 (官方文档推荐，性能优异)
+    "black-forest-labs/FLUX.1-dev": "FLUX.1 Dev (最强大的图像生成模型，推荐)",
+    "black-forest-labs/FLUX.1-schnell": "FLUX.1 Schnell (快速生成，高质量)",
+    "stabilityai/stable-diffusion-xl-base-1.0": "SDXL Base 1.0 (高分辨率，经典选择)",
+    "stabilityai/stable-diffusion-3.5-large": "SD 3.5 Large (最新版本)",
+    "stabilityai/stable-diffusion-3-medium-diffusers": "SD 3 Medium (强大的文生图)",
+    "latent-consistency/lcm-lora-sdxl": "LCM-LoRA SDXL (快速且强大)",
+    "Kwai-Kolors/Kolors": "Kolors (逼真图像生成)",
+    
+    # 经典稳定的API模型
+    "runwayml/stable-diffusion-v1-5": "Stable Diffusion v1.5 (经典基础模型)",
     "stabilityai/stable-diffusion-2-1": "Stable Diffusion v2.1 (更高质量)",
-    "dreamlike-art/dreamlike-diffusion-1.0": "Dreamlike Diffusion (艺术风格)",
-    "prompthero/openjourney": "OpenJourney (多样化风格)",
+    "prompthero/openjourney": "OpenJourney (多样化艺术风格)",
+    "dreamlike-art/dreamlike-diffusion-1.0": "Dreamlike Diffusion (梦幻艺术风格)",
+}
+
+# 仅本地模式支持的模型
+LOCAL_ONLY_MODELS = {
     "wavymulder/Analog-Diffusion": "Analog Diffusion (胶片风格)",
     "22h/vintedois-diffusion-v0-1": "VintedoisDiffusion (复古风格)",
     "nitrosocke/Arcane-Diffusion": "Arcane Diffusion (动画风格)",
     "hakurei/waifu-diffusion": "Waifu Diffusion (动漫风格)"
 }
+
+# 根据运行模式动态获取可用模型
+def get_available_models(run_mode):
+    if run_mode == "api":
+        return API_SUPPORTED_MODELS
+    else:
+        # 本地模式支持所有模型
+        return {**API_SUPPORTED_MODELS, **LOCAL_ONLY_MODELS}
+
+# 兼容性：保持原有MODELS变量
+MODELS = {**API_SUPPORTED_MODELS, **LOCAL_ONLY_MODELS}
 
 # Prompt 辅助词条
 PROMPT_CATEGORIES = {
@@ -216,7 +421,7 @@ NEGATIVE_PROMPT_CATEGORIES = {
 }
 
 def load_models(run_mode, selected_model, controlnet_type="canny", api_token=""):
-    """加载模型管道"""
+    """加载模型管道 - 改进版本，支持API模型检测"""
     global pipe, controlnet_pipe, img2img_pipe, current_model, current_controlnet, RUN_MODE, HF_API_TOKEN
     
     if not selected_model:
@@ -227,12 +432,26 @@ def load_models(run_mode, selected_model, controlnet_type="canny", api_token="")
     current_model = selected_model
     if api_token.strip():
         HF_API_TOKEN = api_token.strip()
-    model_name = MODELS.get(selected_model, selected_model)
+    
+    # 获取模型信息
+    available_models = get_available_models(run_mode)
+    model_name = available_models.get(selected_model, selected_model)
     
     if run_mode == "api":
-        # API模式 - 不下载模型
+        # API模式 - 检查模型支持
         if selected_model not in API_ENDPOINTS:
-            return f"❌ 模型 {model_name} 不支持API模式\n💡 请选择支持API的模型或切换到本地模式"
+            supported_models = list(API_SUPPORTED_MODELS.keys())
+            recommended = supported_models[:3]  # 推荐前3个
+            
+            return f"❌ 模型 {model_name} 不支持API模式\n\n� 推荐支持API的模型:\n" + \
+                   "\n".join([f"• {API_SUPPORTED_MODELS[m]}" for m in recommended]) + \
+                   f"\n\n💡 共有 {len(supported_models)} 个模型支持API模式，请在下拉菜单中选择"
+        
+        # 检查Token有效性（如果提供）
+        token_status = ""
+        if api_token.strip():
+            # 可以在这里调用Token验证函数
+            token_status = "\n🔑 使用认证Token"
         
         # 模拟加载成功
         pipe = "api_mode"
@@ -240,8 +459,17 @@ def load_models(run_mode, selected_model, controlnet_type="canny", api_token="")
         controlnet_pipe = "api_mode"
         current_controlnet = controlnet_type
         
-        api_status = "🌐 API模式 - 无需下载模型" if not HF_API_TOKEN else "🌐 API模式 - 使用认证Token"
-        return f"✅ API模式配置成功！\n📦 当前模型: {model_name}\n🎯 模型ID: {selected_model}\n🎮 ControlNet: {CONTROLNET_TYPES[controlnet_type]['name']}\n{api_status}\n💾 存储空间占用: 0 GB"
+        # 判断模型类型并给出相应提示
+        if selected_model.startswith("black-forest-labs/FLUX"):
+            quality_tip = "\n⚡ FLUX系列 - 最新一代模型，图像质量极高"
+        elif selected_model.startswith("stabilityai/stable-diffusion-xl"):
+            quality_tip = "\n� SDXL系列 - 高分辨率生成，经典选择"
+        elif selected_model.startswith("stabilityai/stable-diffusion-3"):
+            quality_tip = "\n🚀 SD3系列 - 最新技术，文本理解能力强"
+        else:
+            quality_tip = "\n📝 经典模型 - 稳定可靠"
+        
+        return f"✅ API模式配置成功！\n📦 当前模型: {model_name}\n🎯 模型ID: {selected_model}\n🎮 ControlNet: {CONTROLNET_TYPES[controlnet_type]['name']}{quality_tip}{token_status}\n💾 存储空间占用: 0 GB\n\n💡 API模式无需下载模型，生成图片通过云端推理"
     
     else:
         # 本地模式 - 下载模型到本地
@@ -528,6 +756,13 @@ def create_interface():
         - **🌐 API模式 (推荐)**: 通过 Hugging Face API 在线生成，**无需下载任何模型**，节省 4-10GB 存储空间！
         - **💻 本地模式**: 下载模型到本地运行，需要 4-10GB 存储空间，但运行速度更快，支持更多自定义参数
         - **🔑 API Token**: API模式需要 [Hugging Face Token](https://huggingface.co/settings/tokens) (免费账户即可)
+        
+        ### 🎯 推荐API模型（按性能排序）
+        1. **FLUX.1 Dev** - 🥇 最强大的图像生成模型，质量极高
+        2. **FLUX.1 Schnell** - ⚡ 快速生成，高质量输出
+        3. **SDXL Base 1.0** - 🎨 高分辨率生成，经典选择
+        4. **SD 3.5 Large** - 🚀 最新版本，文本理解能力强
+        5. **Kolors** - 📸 逼真图像生成，人像效果佳
         """)
         
         # 模型选择和加载区域
@@ -545,10 +780,10 @@ def create_interface():
                 )
                 
                 model_dropdown = gr.Dropdown(
-                    choices=list(MODELS.keys()),
-                    value="runwayml/stable-diffusion-v1-5",
-                    label="🤖 选择基础模型",
-                    info="选择不同的预训练模型以获得不同的艺术风格"
+                    choices=list(API_SUPPORTED_MODELS.keys()),
+                    value="black-forest-labs/FLUX.1-dev",
+                    label="🤖 选择基础模型 (仅API支持的模型)",
+                    info="✅ API模式 - 这些模型支持云端推理，无需下载"
                 )
                 controlnet_dropdown = gr.Dropdown(
                     choices=[(f"{info['name']} - {info['description']}", key) for key, info in CONTROLNET_TYPES.items()],
@@ -573,6 +808,25 @@ def create_interface():
                         type="password",
                         info="点击上方链接获取免费Token，提升API调用稳定性"
                     )
+                    
+                    # API Token 验证状态
+                    token_status = gr.Textbox(
+                        label="Token验证状态",
+                        value="⚠️ 请输入API Token进行验证",
+                        interactive=False,
+                        lines=1
+                    )
+                    
+                    # 模型API支持状态
+                    model_api_status = gr.Textbox(
+                        label="模型API支持状态",
+                        value="✅ 当前模型支持API模式",
+                        interactive=False,
+                        lines=1
+                    )
+                    
+                    # API连接测试按钮
+                    test_api_btn = gr.Button("🔗 测试API连接", variant="secondary")
                 
                 # 代理设置
                 with gr.Accordion("🌐 网络代理设置 (解决连接超时问题)", open=False):
@@ -973,24 +1227,22 @@ def create_interface():
             HF_API_TOKEN = token.strip() if token else None
             return f"🔑 API Token {'已设置' if token else '未设置'}"
         
-        # 运行模式切换事件  
-        def update_run_mode(mode):
+        # 运行模式切换事件 - 更新模型选择器和显示
+        def update_run_mode_and_models(mode):
             global RUN_MODE
             RUN_MODE = mode
             mode_text = "🌐 API模式" if mode == "api" else "💻 本地模式"
             storage_text = "存储占用: 0 GB" if mode == "api" else "存储占用: 4-10 GB"
-            return f"⚙️ {mode_text}\n💾 {storage_text}"
-        
-        api_token_input.change(
-            update_api_token,
-            inputs=[api_token_input],
-            outputs=[]
-        )
+            status_text = f"⚙️ {mode_text}\n💾 {storage_text}"
+            
+            # 同时更新模型选择器
+            model_update = update_model_choices(mode)
+            return status_text, model_update
         
         run_mode_radio.change(
-            update_run_mode,
+            update_run_mode_and_models,
             inputs=[run_mode_radio],
-            outputs=[]
+            outputs=[current_model_display, model_dropdown]
         )
         
         # 代理设置事件
@@ -1021,6 +1273,36 @@ def create_interface():
             auto_push_to_github,
             inputs=[],
             outputs=[github_status]
+        )
+        
+        # API Token 实时验证
+        api_token_input.change(
+            validate_api_key,
+            inputs=[api_token_input],
+            outputs=[token_status]
+        )
+        
+        # 模型API支持检测
+        def update_model_api_status(model_id, run_mode):
+            return check_model_api_support(model_id, run_mode)
+        
+        model_dropdown.change(
+            update_model_api_status,
+            inputs=[model_dropdown, run_mode_radio],
+            outputs=[model_api_status]
+        )
+        
+        run_mode_radio.change(
+            update_model_api_status,
+            inputs=[model_dropdown, run_mode_radio],
+            outputs=[model_api_status]
+        )
+        
+        # API连接测试
+        test_api_btn.click(
+            test_model_api_connection,
+            inputs=[model_dropdown, api_token_input],
+            outputs=[model_api_status]
         )
         
         # 模型加载事件
@@ -1334,6 +1616,426 @@ def generate_img2img_api(prompt, negative_prompt, input_image, strength):
     except Exception as e:
         return None, f"❌ img2img API暂不支持，建议使用本地模式或文生图功能: {str(e)}"
 
-if __name__ == "__main__":
-    demo = create_interface()
-    demo.launch(debug=True)
+def update_model_choices(run_mode):
+    """根据运行模式动态更新模型选择器"""
+    available_models = get_available_models(run_mode)
+    
+    if run_mode == "api":
+        # API模式：只显示支持API的模型，按推荐程度排序
+        recommended_order = [
+            "black-forest-labs/FLUX.1-dev",
+            "black-forest-labs/FLUX.1-schnell", 
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            "stabilityai/stable-diffusion-3.5-large",
+            "stabilityai/stable-diffusion-3-medium-diffusers",
+            "latent-consistency/lcm-lora-sdxl",
+            "Kwai-Kolors/Kolors",
+            "runwayml/stable-diffusion-v1-5",
+            "stabilityai/stable-diffusion-2-1",
+            "prompthero/openjourney",
+            "dreamlike-art/dreamlike-diffusion-1.0"
+        ]
+        
+        choices = []
+        for model_id in recommended_order:
+            if model_id in available_models:
+                choices.append(model_id)
+        
+        # 默认选择第一个推荐模型
+        default_value = choices[0] if choices else "black-forest-labs/FLUX.1-dev"
+        
+        return gr.Dropdown.update(
+            choices=choices,
+            value=default_value,
+            label="🤖 选择基础模型 (仅API支持的模型)",
+            info="✅ API模式 - 这些模型支持云端推理，无需下载"
+        )
+    else:
+        # 本地模式：显示所有模型
+        choices = list(available_models.keys())
+        return gr.Dropdown.update(
+            choices=choices,
+            value="runwayml/stable-diffusion-v1-5",
+            label="🤖 选择基础模型 (支持所有模型)",
+            info="💾 本地模式 - 首次使用需要下载模型文件（4-10GB）"
+        )
+
+# ...existing code...
+
+        # 代理设置事件
+        def update_proxy_settings(enabled, http_proxy, https_proxy):
+            status = update_proxy_config(enabled, http_proxy, https_proxy)
+            return status
+        
+        proxy_enabled.change(
+            update_proxy_settings,
+            inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
+            outputs=[proxy_status]
+        )
+        
+        http_proxy_input.change(
+            update_proxy_settings,
+            inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
+            outputs=[proxy_status]
+        )
+        
+        https_proxy_input.change(
+            update_proxy_settings,
+            inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
+            outputs=[proxy_status]
+        )
+        
+        # GitHub 推送事件
+        push_to_github_btn.click(
+            auto_push_to_github,
+            inputs=[],
+            outputs=[github_status]
+        )
+        
+        # API Token 实时验证
+        api_token_input.change(
+            validate_api_key,
+            inputs=[api_token_input],
+            outputs=[token_status]
+        )
+        
+        # 模型API支持检测
+        def update_model_api_status(model_id, run_mode):
+            return check_model_api_support(model_id, run_mode)
+        
+        model_dropdown.change(
+            update_model_api_status,
+            inputs=[model_dropdown, run_mode_radio],
+            outputs=[model_api_status]
+        )
+        
+        run_mode_radio.change(
+            update_model_api_status,
+            inputs=[model_dropdown, run_mode_radio],
+            outputs=[model_api_status]
+        )
+        
+        # API连接测试
+        test_api_btn.click(
+            test_model_api_connection,
+            inputs=[model_dropdown, api_token_input],
+            outputs=[model_api_status]
+        )
+        
+        # 模型加载事件
+        load_btn.click(
+            load_models, 
+            inputs=[run_mode_radio, model_dropdown, controlnet_dropdown, api_token_input], 
+            outputs=[load_status]
+        )
+        
+        # 更新当前模型显示
+        model_dropdown.change(
+            lambda x: f"📦 选中模型: {MODELS.get(x, x)}",
+            inputs=[model_dropdown],
+            outputs=[current_model_display]
+        )
+        
+        # Prompt 辅助器事件
+        def get_selected_positive_tags(*tag_groups):
+            """获取所有选中的正面标签"""
+            selected_tags = []
+            for tags in tag_groups:
+                if tags:
+                    selected_tags.extend(tags)
+            return ", ".join(selected_tags) if selected_tags else ""
+        
+        def get_selected_negative_tags(*tag_groups):
+            """获取所有选中的负面标签"""
+            selected_tags = []
+            for tags in tag_groups:
+                if tags:
+                    selected_tags.extend(tags)
+            return ", ".join(selected_tags) if selected_tags else ""
+        
+        def clear_all_tags():
+            return [[] for _ in range(14)]  # 7个正面tag组 + 7个负面tag组
+        
+        # 正面词条应用到各个prompt框的事件
+        apply_positive_to_prompt1.click(
+            get_selected_positive_tags,
+            inputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags],
+            outputs=[prompt1]
+        )
+        
+        apply_positive_to_img2img.click(
+            get_selected_positive_tags,
+            inputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags],
+            outputs=[prompt_img2img]
+        )
+        
+        apply_positive_to_prompt2.click(
+            get_selected_positive_tags,
+            inputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags],
+            outputs=[prompt2]
+        )
+        
+        # 负面词条应用到各个negative prompt框的事件
+        apply_negative_to_prompt1.click(
+            get_selected_negative_tags,
+            inputs=[neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags],
+            outputs=[negative_prompt1]
+        )
+        
+        apply_negative_to_img2img.click(
+            get_selected_negative_tags,
+            inputs=[neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags],
+            outputs=[negative_prompt_img2img]
+        )
+        
+        apply_negative_to_prompt2.click(
+            get_selected_negative_tags,
+            inputs=[neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags],
+            outputs=[negative_prompt2]
+        )
+        
+        # 全局应用按钮事件（兼容性保留）
+        apply_positive_tags_btn.click(
+            get_selected_positive_tags,
+            inputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags],
+            outputs=[]
+        )
+        
+        apply_negative_tags_btn.click(
+            get_selected_negative_tags,
+            inputs=[neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags],
+            outputs=[]
+        )
+        
+        clear_tags_btn.click(
+            clear_all_tags,
+            outputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags,
+                    neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags]
+        )
+        
+        # 原有的生成事件
+        generate_btn1.click(
+            generate_image,
+            inputs=[prompt1, negative_prompt1, num_steps1, guidance_scale1, width1, height1, seed1],
+            outputs=[output_image1, output_status1]
+        )
+        
+        generate_btn_img2img.click(
+            generate_img2img,
+            inputs=[prompt_img2img, negative_prompt_img2img, input_image, strength, num_steps_img2img, guidance_scale_img2img, width_img2img, height_img2img, seed_img2img],
+            outputs=[output_image_img2img, output_status_img2img]
+        )
+        
+        generate_btn2.click(
+            generate_controlnet_image,
+            inputs=[prompt2, negative_prompt2, control_image, control_type_radio, num_steps2, guidance_scale2, controlnet_scale, width2, height2, seed2],
+            outputs=[output_image2, control_preview, output_status2]
+        )
+        
+        # 更新模型选择器
+        run_mode_radio.change(
+            update_model_choices,
+            inputs=[run_mode_radio],
+            outputs=[model_dropdown]
+        )
+        
+        return demo
+
+def query_hf_api(endpoint, payload, api_token=None):
+    """Call Hugging Face API with proxy support"""
+    headers = {"Content-Type": "application/json"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    
+    # 配置代理
+    proxies = {}
+    if PROXY_CONFIG["enabled"]:
+        if PROXY_CONFIG["http"]:
+            proxies["http"] = PROXY_CONFIG["http"]
+        if PROXY_CONFIG["https"]:
+            proxies["https"] = PROXY_CONFIG["https"]
+    
+    try:
+        # 增加超时时间并使用代理
+        response = requests.post(
+            endpoint, 
+            headers=headers, 
+            json=payload, 
+            timeout=120,  # 增加到2分钟
+            proxies=proxies if proxies else None
+        )
+        
+        if response.status_code == 200:
+            return response.content
+        elif response.status_code == 503:
+            raise Exception("Model is loading, please try again later")
+        elif response.status_code == 429:
+            raise Exception("API rate limit exceeded, please try again later")
+        elif response.status_code == 401:
+            raise Exception("Invalid or missing API token")
+        elif response.status_code == 404:
+            raise Exception("Model endpoint not found")
+        else:
+            # Ensure error message is ASCII safe
+            error_text = "Unknown API error"
+            try:
+                if response.text:
+                    # Try to get ASCII-safe error message
+                    error_text = response.text.encode('ascii', 'ignore').decode('ascii')
+                    if not error_text.strip():
+                        error_text = "API error with non-ASCII response"
+            except:
+                error_text = "API response encoding error"
+            raise Exception(f"API call failed: {response.status_code}, {error_text}")
+    except requests.exceptions.Timeout:
+        proxy_info = f" (using proxy: {proxies})" if proxies else " (no proxy)"
+        raise Exception(f"API call timeout after 120s{proxy_info}, please check network connection or proxy settings")
+    except requests.exceptions.ConnectionError as e:
+        proxy_info = f" (using proxy: {proxies})" if proxies else " (no proxy)"
+        raise Exception(f"Network connection error{proxy_info}, please check network settings or try enabling proxy")
+    except Exception as e:
+        # Ensure all error messages are ASCII safe
+        error_msg = str(e)
+        try:
+            error_msg.encode('ascii')
+        except UnicodeEncodeError:
+            error_msg = "API call error with encoding issues"
+        raise Exception(error_msg)
+
+def generate_image_api(prompt, negative_prompt="", model_id="runwayml/stable-diffusion-v1-5"):
+    """Generate image using API"""
+    endpoint = API_ENDPOINTS.get(model_id)
+    if not endpoint:
+        raise Exception(f"Model {model_id} does not support API mode")
+    
+    # Ensure prompt and negative_prompt are ASCII safe
+    try:
+        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
+        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
+    except:
+        safe_prompt = "safe prompt"
+        safe_negative_prompt = ""
+    
+    payload = {
+        "inputs": safe_prompt,
+        "parameters": {
+            "negative_prompt": safe_negative_prompt,
+            "num_inference_steps": 20,
+            "guidance_scale": 7.5,
+        }
+    }
+    
+    try:
+        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
+        image = Image.open(io.BytesIO(image_bytes))
+        return image, "API image generation successful!"
+    except Exception as e:
+        return None, f"API generation failed: {str(e)}"
+
+def generate_controlnet_image_api(prompt, negative_prompt, control_image, control_type):
+    """Generate ControlNet image using API"""
+    endpoint = CONTROLNET_API_ENDPOINTS.get(control_type)
+    if not endpoint:
+        raise Exception(f"ControlNet type {control_type} does not support API mode")
+    
+    # Convert control image to base64
+    import base64
+    import io
+    
+    buffered = io.BytesIO()
+    control_image.save(buffered, format="PNG")
+    control_image_b64 = base64.b64encode(buffered.getvalue()).decode()
+    
+    # Ensure prompt and negative_prompt are safe
+    try:
+        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
+        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
+    except:
+        safe_prompt = "safe prompt"
+        safe_negative_prompt = ""
+    
+    payload = {
+        "inputs": {
+            "prompt": safe_prompt,
+            "image": control_image_b64,
+            "negative_prompt": safe_negative_prompt
+        }
+    }
+    
+    try:
+        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
+        image = Image.open(io.BytesIO(image_bytes))
+        control_type_name = CONTROLNET_TYPES[control_type]['name']
+        return image, f"API mode {control_type_name} image generation successful!"
+    except Exception as e:
+        return None, f"ControlNet API generation failed: {str(e)}"
+
+def generate_img2img_api(prompt, negative_prompt, input_image, strength):
+    """Generate img2img image using API"""
+    # Note: Hugging Face public API has limited img2img support
+    # This is a basic implementation that may need adjustment
+    endpoint = API_ENDPOINTS.get("runwayml/stable-diffusion-v1-5")  # Use default model
+    if not endpoint:
+        raise Exception("img2img API mode not supported")
+    
+    # Convert input image to base64
+    import base64
+    import io
+    
+    buffered = io.BytesIO()
+    input_image.save(buffered, format="PNG")
+    input_image_b64 = base64.b64encode(buffered.getvalue()).decode()
+    
+    # Ensure prompt and negative_prompt are safe
+    try:
+        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
+        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
+    except:
+        safe_prompt = "safe prompt"
+        safe_negative_prompt = ""
+    
+    # Note: This is a simplified implementation, real img2img API may need different payload format
+    payload = {
+        "inputs": {
+            "prompt": safe_prompt,
+            "image": input_image_b64,
+            "negative_prompt": safe_negative_prompt,
+            "strength": strength
+        }
+    }
+    
+    try:
+        # Note: Since Hugging Face public API has limited img2img support, this may fail
+        # Users are recommended to use text-to-image function in API mode
+        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
+        image = Image.open(io.BytesIO(image_bytes))
+        return image, "API mode img2img image generation successful!"
+    except Exception as e:
+        return None, f"img2img API not supported, recommend using local mode or text-to-image function: {str(e)}"
+    
+    # 将输入图像转换为base64
+    import base64
+    import io
+    
+    buffered = io.BytesIO()
+    input_image.save(buffered, format="PNG")
+    input_image_b64 = base64.b64encode(buffered.getvalue()).decode()
+    
+    # 注意：这是一个简化的实现，真实的img2img API可能需要不同的payload格式
+    payload = {
+        "inputs": {
+            "prompt": prompt,
+            "image": input_image_b64,
+            "negative_prompt": negative_prompt if negative_prompt else "",
+            "strength": strength
+        }
+    }
+    
+    try:
+        # 注意：由于Hugging Face公共API对img2img支持有限，这里可能会失败
+        # 建议用户在API模式下优先使用文生图功能
+        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
+        image = Image.open(io.BytesIO(image_bytes))
+        return image, "✅ API模式 img2img 图像生成成功！"
+    except Exception as e:
+        return None, f"❌ img2img API暂不支持，建议使用本地模式或文生图功能: {str(e)}"
