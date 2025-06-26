@@ -46,3 +46,10 @@ gradio_cached_examples/
 
 # Logs
 *.log
+
+# 忽略主目录下所有图片文件
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.webp

@@ -24,6 +24,25 @@ current_controlnet = None
 RUN_MODE = "api"  # "local" 或 "api"
 HF_API_TOKEN = None  # 在这里设置您的 Hugging Face API Token
 
+# 代理设置 (用于解决网络连接问题)
+PROXY_CONFIG = {
+    "enabled": False,
+    "http": None,
+    "https": None
+}
+
+def update_proxy_config(enabled, http_proxy, https_proxy):
+    """更新代理配置"""
+    global PROXY_CONFIG
+    PROXY_CONFIG["enabled"] = enabled
+    PROXY_CONFIG["http"] = http_proxy if http_proxy.strip() else None
+    PROXY_CONFIG["https"] = https_proxy if https_proxy.strip() else None
+    
+    if enabled and (PROXY_CONFIG["http"] or PROXY_CONFIG["https"]):
+        return f"✅ 代理已启用: HTTP={PROXY_CONFIG['http'] or 'None'}, HTTPS={PROXY_CONFIG['https'] or 'None'}"
+    else:
+        return "❌ 代理已禁用"
+
 # API模式下的推理端点
 API_ENDPOINTS = {
     "runwayml/stable-diffusion-v1-5": "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5",
@@ -506,6 +525,82 @@ def create_interface():
                         type="password",
                         info="点击上方链接获取免费Token，提升API调用稳定性"
                     )
+                
+                # 代理设置
+                with gr.Accordion("🌐 网络代理设置 (解决连接超时问题)", open=False):
+                    gr.Markdown("""
+                    **🚨 如果遇到 "API call timeout" 错误，请启用代理：**
+                    
+                    **Clash 代理设置：**
+                    - HTTP代理端口通常是：`http://127.0.0.1:7890`
+                    - HTTPS代理端口通常是：`http://127.0.0.1:7890`
+                    - 如果端口不同，请查看 Clash 的端口设置
+                    
+                    **其他代理软件：**
+                    - V2Ray: `http://127.0.0.1:10809`
+                    - Shadowsocks: `http://127.0.0.1:1080`
+                    - 请根据您的代理软件实际端口填写
+                    """)
+                    
+                    proxy_enabled = gr.Checkbox(
+                        label="启用代理",
+                        value=False,
+                        info="如果网络连接超时，请启用此选项"
+                    )
+                    
+                    with gr.Row():
+                        http_proxy_input = gr.Textbox(
+                            label="HTTP 代理",
+                            placeholder="http://127.0.0.1:7890",
+                            info="填写 HTTP 代理地址和端口"
+                        )
+                        https_proxy_input = gr.Textbox(
+                            label="HTTPS 代理", 
+                            placeholder="http://127.0.0.1:7890",
+                            info="填写 HTTPS 代理地址和端口"
+                        )
+                    
+                    proxy_status = gr.Textbox(
+                        label="代理状态",
+                        value="❌ 代理已禁用",
+                        interactive=False
+                    )
+                    
+                    test_proxy_btn = gr.Button("🔗 测试代理连接", variant="secondary")
+                    
+                    def test_proxy_connection(enabled, http_proxy, https_proxy):
+                        """测试代理连接"""
+                        if not enabled:
+                            return "❌ 代理未启用，无法测试"
+                        
+                        if not (http_proxy or https_proxy):
+                            return "❌ 请填写代理地址"
+                        
+                        proxies = {}
+                        if http_proxy:
+                            proxies["http"] = http_proxy
+                        if https_proxy:
+                            proxies["https"] = https_proxy
+                        
+                        try:
+                            # 测试连接到 Hugging Face
+                            response = requests.get(
+                                "https://huggingface.co", 
+                                proxies=proxies, 
+                                timeout=10
+                            )
+                            if response.status_code == 200:
+                                return "✅ 代理连接测试成功！"
+                            else:
+                                return f"⚠️ 代理连接测试失败，状态码: {response.status_code}"
+                        except Exception as e:
+                            return f"❌ 代理连接测试失败: {str(e)}"
+                    
+                    test_proxy_btn.click(
+                        test_proxy_connection,
+                        inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
+                        outputs=[proxy_status]
+                    )
                     
                 load_btn = gr.Button("🚀 加载选中模型", variant="primary", size="lg")
             with gr.Column(scale=2):
@@ -826,6 +921,29 @@ def create_interface():
             outputs=[]
         )
         
+        # 代理设置事件
+        def update_proxy_settings(enabled, http_proxy, https_proxy):
+            status = update_proxy_config(enabled, http_proxy, https_proxy)
+            return status
+        
+        proxy_enabled.change(
+            update_proxy_settings,
+            inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
+            outputs=[proxy_status]
+        )
+        
+        http_proxy_input.change(
+            update_proxy_settings,
+            inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
+            outputs=[proxy_status]
+        )
+        
+        https_proxy_input.change(
+            update_proxy_settings,
+            inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
+            outputs=[proxy_status]
+        )
+        
         # 模型加载事件
         load_btn.click(
             load_models, 
@@ -939,13 +1057,29 @@ def create_interface():
     return demo
 
 def query_hf_api(endpoint, payload, api_token=None):
-    """Call Hugging Face API"""
+    """Call Hugging Face API with proxy support"""
     headers = {"Content-Type": "application/json"}
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"
     
+    # 配置代理
+    proxies = {}
+    if PROXY_CONFIG["enabled"]:
+        if PROXY_CONFIG["http"]:
+            proxies["http"] = PROXY_CONFIG["http"]
+        if PROXY_CONFIG["https"]:
+            proxies["https"] = PROXY_CONFIG["https"]
+    
     try:
-        response = requests.post(endpoint, headers=headers, json=payload, timeout=60)
+        # 增加超时时间并使用代理
+        response = requests.post(
+            endpoint, 
+            headers=headers, 
+            json=payload, 
+            timeout=120,  # 增加到2分钟
+            proxies=proxies if proxies else None
+        )
+        
         if response.status_code == 200:
             return response.content
         elif response.status_code == 503:
@@ -969,9 +1103,11 @@ def query_hf_api(endpoint, payload, api_token=None):
                 error_text = "API response encoding error"
             raise Exception(f"API call failed: {response.status_code}, {error_text}")
     except requests.exceptions.Timeout:
-        raise Exception("API call timeout, please check network connection")
-    except requests.exceptions.ConnectionError:
-        raise Exception("Network connection error, please check network settings")
+        proxy_info = f" (using proxy: {proxies})" if proxies else " (no proxy)"
+        raise Exception(f"API call timeout after 120s{proxy_info}, please check network connection or proxy settings")
+    except requests.exceptions.ConnectionError as e:
+        proxy_info = f" (using proxy: {proxies})" if proxies else " (no proxy)"
+        raise Exception(f"Network connection error{proxy_info}, please check network settings or try enabling proxy")
     except Exception as e:
         # Ensure all error messages are ASCII safe
         error_msg = str(e)
