@@ -1,740 +1,20 @@
+"""
+主应用文件 - AI图像生成器界面
+重构后的模块化版本
+"""
+
 import gradio as gr
-import torch
-from diffusers import StableDiffusionPipeline, StableDiffusionControlNetPipeline, ControlNetModel
-from diffusers import StableDiffusionImg2ImgPipeline, DPMSolverMultistepScheduler
-import cv2
-import numpy as np
-from PIL import Image
 import warnings
-import requests
-import io
-import base64
-import subprocess
-import os
-from datetime import datetime
+
+# 导入自定义模块
+from config import CONTROLNET_TYPES, PROMPT_CATEGORIES, NEGATIVE_PROMPT_CATEGORIES, API_SUPPORTED_MODELS, MODELS, update_proxy_config
+from models import load_models, get_current_model_info
+from image_generation import generate_image, generate_controlnet_image, generate_img2img, add_prompt_tags
+from api_client import validate_api_key, check_model_api_support, test_model_api_connection, set_api_token
+from utils import auto_push_to_github, test_proxy_connection, update_model_choices, setup_cleanup_handlers, find_free_port
+import utils  # 导入utils模块以便访问全局变量
 
 warnings.filterwarnings("ignore")
-
-# 全局变量存储管道
-pipe = None
-controlnet_pipe = None
-img2img_pipe = None
-device = "cuda" if torch.cuda.is_available() else "cpu"
-current_model = "runwayml/stable-diffusion-v1-5"
-current_controlnet = None
-
-# 运行模式选择
-RUN_MODE = "api"  # "local" 或 "api"
-HF_API_TOKEN = None  # 在这里设置您的 Hugging Face API Token
-
-# 代理设置 (用于解决网络连接问题)
-PROXY_CONFIG = {
-    "enabled": False,
-    "http": None,
-    "https": None
-}
-
-def update_proxy_config(enabled, http_proxy, https_proxy):
-    """更新代理配置"""
-    global PROXY_CONFIG
-    PROXY_CONFIG["enabled"] = enabled
-    PROXY_CONFIG["http"] = http_proxy if http_proxy.strip() else None
-    PROXY_CONFIG["https"] = https_proxy if https_proxy.strip() else None
-    
-    if enabled and (PROXY_CONFIG["http"] or PROXY_CONFIG["https"]):
-        return f"✅ 代理已启用: HTTP={PROXY_CONFIG['http'] or 'None'}, HTTPS={PROXY_CONFIG['https'] or 'None'}"
-    else:
-        return "❌ 代理已禁用"
-
-def auto_push_to_github():
-    """自动推送到 GitHub"""
-    try:
-        print("🚀 开始自动推送到 GitHub...")
-        
-        # 检查是否在 git 仓库中
-        result = subprocess.run("git status", shell=True, capture_output=True, text=True)
-        if result.returncode != 0:
-            return "❌ 当前目录不是 git 仓库或 git 未安装"
-        
-        # 添加所有更改的文件
-        result = subprocess.run("git add .", shell=True, capture_output=True, text=True)
-        if result.returncode != 0:
-            return f"❌ 添加文件失败: {result.stderr}"
-        
-        # 检查是否有更改需要提交
-        result = subprocess.run("git diff --staged --quiet", shell=True, capture_output=True, text=True)
-        if result.returncode == 0:  # 如果命令成功，说明没有更改
-            return "✅ 没有新的更改需要提交"
-        
-        # 生成时间戳
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # 准备提交信息
-        commit_message = f"Auto update: {timestamp} - 功能更新和优化"
-        
-        # 提交更改
-        result = subprocess.run(f'git commit -m "{commit_message}"', shell=True, capture_output=True, text=True)
-        if result.returncode != 0:
-            return f"❌ 提交失败: {result.stderr}"
-        
-        # 推送到远程仓库
-        result = subprocess.run("git push origin main", shell=True, capture_output=True, text=True)
-        if result.returncode != 0:
-            return f"❌ 推送失败: {result.stderr}\n💡 请检查网络连接或 GitHub 权限"
-        
-        # 获取仓库 URL
-        result = subprocess.run("git remote get-url origin", shell=True, capture_output=True, text=True)
-        repo_url = result.stdout.strip() if result.returncode == 0 else "未知"
-        
-        return f"✅ 成功推送到 GitHub!\n🔗 仓库: {repo_url}\n⏰ 时间: {timestamp}"
-        
-    except Exception as e:
-        return f"❌ 推送过程中发生错误: {str(e)}"
-
-# API模式下的推理端点 - 官方支持的热门模型
-API_ENDPOINTS = {
-    # 最新推荐模型 (官方文档推荐)
-    "black-forest-labs/FLUX.1-dev": "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev",
-    "black-forest-labs/FLUX.1-schnell": "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
-    "stabilityai/stable-diffusion-xl-base-1.0": "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0",
-    "stabilityai/stable-diffusion-3.5-large": "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-3.5-large",
-    "stabilityai/stable-diffusion-3-medium-diffusers": "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-3-medium-diffusers",
-    "latent-consistency/lcm-lora-sdxl": "https://api-inference.huggingface.co/models/latent-consistency/lcm-lora-sdxl",
-    "Kwai-Kolors/Kolors": "https://api-inference.huggingface.co/models/Kwai-Kolors/Kolors",
-    
-    # 经典稳定的API模型
-    "runwayml/stable-diffusion-v1-5": "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5",
-    "stabilityai/stable-diffusion-2-1": "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-2-1",
-    "prompthero/openjourney": "https://api-inference.huggingface.co/models/prompthero/openjourney",
-    "dreamlike-art/dreamlike-diffusion-1.0": "https://api-inference.huggingface.co/models/dreamlike-art/dreamlike-diffusion-1.0",
-}
-
-# ControlNet API endpoints
-CONTROLNET_API_ENDPOINTS = {
-    "canny": "https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-canny",
-    "scribble": "https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-scribble", 
-    "depth": "https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-depth"
-}
-
-def validate_api_key(api_token):
-    """验证API Key的有效性 - 改进版本"""
-    if not api_token.strip():
-        return "⚠️ 请输入有效的API Token"
-    
-    token = api_token.strip()
-    
-    # 基本格式检查
-    if not token.startswith('hf_'):
-        return "❌ Token格式错误：应该以 'hf_' 开头"
-    
-    if len(token) < 30:
-        return "❌ Token长度过短：请检查是否完整复制"
-    
-    try:
-        # 构建代理配置
-        proxies = None
-        if PROXY_CONFIG.get('enabled'):
-            proxies = {}
-            if PROXY_CONFIG.get('http'):
-                proxies['http'] = PROXY_CONFIG['http']
-            if PROXY_CONFIG.get('https'):
-                proxies['https'] = PROXY_CONFIG['https']
-        
-        headers = {"Authorization": f"Bearer {token}"}
-        
-        # 方法1: 尝试访问用户信息API (使用正确的v2端点)
-        try:
-            response = requests.get(
-                "https://huggingface.co/api/whoami-v2",
-                headers=headers,
-                timeout=15,
-                proxies=proxies
-            )
-            
-            if response.status_code == 200:
-                try:
-                    user_info = response.json()
-                    username = user_info.get('name', 'User')
-                    return f"✅ Token验证成功 - 用户: {username}"
-                except:
-                    return f"✅ Token验证成功 - API响应正常"
-            elif response.status_code == 401:
-                return "❌ Token无效：请检查Token是否正确或已过期"
-            elif response.status_code == 403:
-                return "⚠️ Token权限受限，但可能可用于基础API调用"
-            else:
-                # 如果whoami失败，继续尝试其他验证方法
-                pass
-                
-        except requests.exceptions.RequestException:
-            # whoami API失败，尝试其他方法
-            pass
-        
-        # 方法2: 尝试访问模型列表API（更宽松的验证）
-        try:
-            response = requests.get(
-                "https://huggingface.co/api/models",
-                headers=headers,
-                timeout=15,
-                proxies=proxies,
-                params={"limit": 1}  # 只请求1个模型，减少流量
-            )
-            
-            if response.status_code == 200:
-                return f"✅ Token基本有效 - 可访问模型API"
-            elif response.status_code == 401:
-                return "❌ Token无效或已过期"
-            elif response.status_code == 403:
-                return "⚠️ Token权限不足，但格式正确"
-            else:
-                return f"⚠️ API返回状态 {response.status_code}，请检查Token权限"
-                
-        except requests.exceptions.RequestException:
-            pass
-        
-        # 方法3: 最后尝试简单的推理API检查（HEAD请求）
-        try:
-            test_endpoint = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5"
-            response = requests.head(
-                test_endpoint,
-                headers=headers,
-                timeout=10,
-                proxies=proxies
-            )
-            
-            if response.status_code in [200, 503]:  # 503表示模型在加载
-                return f"✅ Token可用于推理API"
-            elif response.status_code == 401:
-                return "❌ Token无效，无法访问推理API"
-            elif response.status_code == 403:
-                return "❌ Token权限不足，无法访问推理API"
-            else:
-                return f"⚠️ 推理API返回状态 {response.status_code}，Token可能有效"
-                
-        except requests.exceptions.Timeout:
-            return f"⚠️ 网络超时，Token格式正确但无法验证连接"
-        except requests.exceptions.ConnectionError:
-            return f"⚠️ 网络连接失败，请检查网络设置或代理配置"
-            
-    except Exception as e:
-        return f"❌ 验证过程出错: {str(e)[:50]}..."
-    
-    # 如果所有API调用都失败，但Token格式正确
-    return f"⚠️ 无法验证Token有效性，但格式正确。可能是网络问题或API服务异常"
-
-def check_model_api_support(model_id, run_mode):
-    """检查模型是否支持API模式"""
-    if run_mode != "api":
-        return f"✅ 本地模式 - 支持所有模型"
-    
-    if model_id in API_ENDPOINTS:
-        return f"✅ API模式支持 - {MODELS.get(model_id, model_id)}"
-    else:
-        available_models = ", ".join([MODELS.get(m, m) for m in API_ENDPOINTS.keys()])
-        return f"❌ API模式不支持此模型\n💡 支持的模型: {available_models}"
-
-def test_model_api_connection(model_id, api_token):
-    """测试模型API连接 - 改进版本"""
-    if not api_token.strip():
-        return "⚠️ 请先输入有效的API Token"
-    
-    if model_id not in API_ENDPOINTS:
-        return f"❌ 模型 {model_id} 不支持API模式"
-    
-    try:
-        endpoint = API_ENDPOINTS[model_id]
-        headers = {"Authorization": f"Bearer {api_token.strip()}"}
-        
-        # 构建代理配置
-        proxies = None
-        if PROXY_CONFIG.get('enabled'):
-            proxies = {}
-            if PROXY_CONFIG.get('http'):
-                proxies['http'] = PROXY_CONFIG['http']
-            if PROXY_CONFIG.get('https'):
-                proxies['https'] = PROXY_CONFIG['https']
-        
-        # 使用HEAD请求检查API可访问性（不实际生成图片）
-        response = requests.head(
-            endpoint,
-            headers=headers,
-            timeout=10,
-            proxies=proxies
-        )
-        
-        model_name = MODELS.get(model_id, model_id)
-        
-        if response.status_code == 200:
-            return f"✅ 模型API连接成功 - {model_name} 可用"
-        elif response.status_code == 503:
-            return f"⚠️ 模型正在加载中 - {model_name} (请稍后重试)"
-        elif response.status_code == 401:
-            return "❌ API Token无效或无权限访问此模型"
-        elif response.status_code == 403:
-            return "❌ Token权限不足，无法访问推理API"
-        elif response.status_code == 404:
-            return f"❌ 模型端点不存在 - {model_name}"
-        elif response.status_code == 429:
-            return f"⚠️ API调用频率限制 - {model_name} (Token有效)"
-        else:
-            return f"⚠️ API返回状态码 {response.status_code} - 连接可能有问题"
-    
-    except requests.exceptions.Timeout:
-        return f"❌ 连接超时 - 请检查网络或启用代理"
-    except requests.exceptions.ConnectionError:
-        return f"❌ 网络连接失败 - 请检查网络设置或代理配置"
-    except Exception as e:
-        return f"❌ 连接测试失败: {str(e)[:50]}..."
-
-# ControlNet 类型选项
-CONTROLNET_TYPES = {
-    "canny": {
-        "name": "Canny边缘检测",
-        "model_id": "lllyasviel/sd-controlnet-canny",
-        "description": "检测图像边缘轮廓，保持物体形状"
-    },
-    "scribble": {
-        "name": "Scribble涂鸦控制",
-        "model_id": "lllyasviel/sd-controlnet-scribble", 
-        "description": "基于手绘涂鸦或简笔画生成图像"
-    },
-    "depth": {
-        "name": "Depth深度控制",
-        "model_id": "lllyasviel/sd-controlnet-depth",
-        "description": "基于深度图控制空间结构和层次"
-    }
-}
-
-# 预定义模型列表 (分为API支持和仅本地支持)
-API_SUPPORTED_MODELS = {
-    # 最新推荐模型 (官方文档推荐，性能优异)
-    "black-forest-labs/FLUX.1-dev": "FLUX.1 Dev (最强大的图像生成模型，推荐)",
-    "black-forest-labs/FLUX.1-schnell": "FLUX.1 Schnell (快速生成，高质量)",
-    "stabilityai/stable-diffusion-xl-base-1.0": "SDXL Base 1.0 (高分辨率，经典选择)",
-    "stabilityai/stable-diffusion-3.5-large": "SD 3.5 Large (最新版本)",
-    "stabilityai/stable-diffusion-3-medium-diffusers": "SD 3 Medium (强大的文生图)",
-    "latent-consistency/lcm-lora-sdxl": "LCM-LoRA SDXL (快速且强大)",
-    "Kwai-Kolors/Kolors": "Kolors (逼真图像生成)",
-    
-    # 经典稳定的API模型
-    "runwayml/stable-diffusion-v1-5": "Stable Diffusion v1.5 (经典基础模型)",
-    "stabilityai/stable-diffusion-2-1": "Stable Diffusion v2.1 (更高质量)",
-    "prompthero/openjourney": "OpenJourney (多样化艺术风格)",
-    "dreamlike-art/dreamlike-diffusion-1.0": "Dreamlike Diffusion (梦幻艺术风格)",
-}
-
-# 仅本地模式支持的模型
-LOCAL_ONLY_MODELS = {
-    "wavymulder/Analog-Diffusion": "Analog Diffusion (胶片风格)",
-    "22h/vintedois-diffusion-v0-1": "VintedoisDiffusion (复古风格)",
-    "nitrosocke/Arcane-Diffusion": "Arcane Diffusion (动画风格)",
-    "hakurei/waifu-diffusion": "Waifu Diffusion (动漫风格)"
-}
-
-# 根据运行模式动态获取可用模型
-def get_available_models(run_mode):
-    if run_mode == "api":
-        return API_SUPPORTED_MODELS
-    else:
-        # 本地模式支持所有模型
-        return {**API_SUPPORTED_MODELS, **LOCAL_ONLY_MODELS}
-
-# 兼容性：保持原有MODELS变量
-MODELS = {**API_SUPPORTED_MODELS, **LOCAL_ONLY_MODELS}
-
-# Prompt 辅助词条
-PROMPT_CATEGORIES = {
-    "质量增强": [
-        "masterpiece", "best quality", "ultra detailed", "extremely detailed", 
-        "high resolution", "8k", "4k", "highly detailed", "sharp focus",
-        "professional photography", "award winning", "cinematic lighting"
-    ],
-    "艺术风格": [
-        "oil painting", "watercolor", "digital art", "concept art", "illustration",
-        "anime style", "cartoon style", "realistic", "photorealistic", "hyperrealistic",
-        "art nouveau", "baroque", "impressionist", "surreal", "abstract"
-    ],
-    "光照效果": [
-        "soft lighting", "dramatic lighting", "cinematic lighting", "golden hour",
-        "studio lighting", "natural lighting", "ambient lighting", "rim lighting",
-        "volumetric lighting", "god rays", "neon lighting", "sunset", "sunrise"
-    ],
-    "构图视角": [
-        "close-up", "portrait", "full body", "wide shot", "aerial view",
-        "bird's eye view", "low angle", "high angle", "profile view",
-        "three-quarter view", "dynamic pose", "action shot"
-    ],
-    "情绪氛围": [
-        "peaceful", "dramatic", "mysterious", "romantic", "epic", "serene",
-        "energetic", "melancholic", "cheerful", "dark", "bright", "cozy",
-        "majestic", "elegant", "powerful", "gentle"
-    ],
-    "环境场景": [
-        "forest", "mountain", "ocean", "city", "countryside", "desert",
-        "fantasy world", "sci-fi", "medieval", "modern", "futuristic",
-        "indoor", "outdoor", "studio", "landscape", "urban", "nature"
-    ],
-    "色彩风格": [
-        "vibrant colors", "muted colors", "monochrome", "black and white",
-        "warm colors", "cool colors", "pastel colors", "neon colors",
-        "earth tones", "jewel tones", "vintage colors", "saturated"
-    ]
-}
-
-# 负面提示词辅助词条
-NEGATIVE_PROMPT_CATEGORIES = {
-    "画质问题": [
-        "blurry", "low quality", "bad quality", "worst quality", "poor quality",
-        "pixelated", "jpeg artifacts", "compression artifacts", "distorted",
-        "low resolution", "grainy", "noisy", "oversaturated", "undersaturated"
-    ],
-    "解剖错误": [
-        "bad anatomy", "bad hands", "bad fingers", "extra fingers", "missing fingers",
-        "extra limbs", "missing limbs", "deformed", "mutated", "disfigured",
-        "malformed", "extra arms", "extra legs", "fused fingers", "too many fingers"
-    ],
-    "面部问题": [
-        "bad face", "ugly face", "distorted face", "asymmetrical face",
-        "bad eyes", "cross-eyed", "extra eyes", "missing eyes", "bad mouth",
-        "bad teeth", "crooked teeth", "bad nose", "asymmetrical features"
-    ],
-    "艺术风格": [
-        "cartoon", "anime", "manga", "3d render", "painting", "sketch",
-        "watercolor", "oil painting", "digital art", "illustration",
-        "abstract", "surreal", "unrealistic", "stylized"
-    ],
-    "技术问题": [
-        "watermark", "signature", "text", "logo", "copyright", "username",
-        "frame", "border", "cropped", "cut off", "out of frame",
-        "duplicate", "error", "glitch", "artifact"
-    ],
-    "光照问题": [
-        "bad lighting", "harsh lighting", "overexposed", "underexposed",
-        "too dark", "too bright", "uneven lighting", "poor contrast",
-        "washed out", "flat lighting", "artificial lighting"
-    ],
-    "构图问题": [
-        "bad composition", "off-center", "tilted", "crooked", "unbalanced",
-        "cluttered", "messy", "chaotic", "poor framing", "bad angle",
-        "awkward pose", "stiff pose", "unnatural pose"
-    ]
-}
-
-def load_models(run_mode, selected_model, controlnet_type="canny", api_token=""):
-    """加载模型管道 - 改进版本，支持API模型检测"""
-    global pipe, controlnet_pipe, img2img_pipe, current_model, current_controlnet, RUN_MODE, HF_API_TOKEN
-    
-    if not selected_model:
-        return "❌ 请选择一个模型"
-    
-    # 更新全局配置
-    RUN_MODE = run_mode
-    current_model = selected_model
-    if api_token.strip():
-        HF_API_TOKEN = api_token.strip()
-    
-    # 获取模型信息
-    available_models = get_available_models(run_mode)
-    model_name = available_models.get(selected_model, selected_model)
-    
-    if run_mode == "api":
-        # API模式 - 检查模型支持
-        if selected_model not in API_ENDPOINTS:
-            supported_models = list(API_SUPPORTED_MODELS.keys())
-            recommended = supported_models[:3]  # 推荐前3个
-            
-            return f"❌ 模型 {model_name} 不支持API模式\n\n� 推荐支持API的模型:\n" + \
-                   "\n".join([f"• {API_SUPPORTED_MODELS[m]}" for m in recommended]) + \
-                   f"\n\n💡 共有 {len(supported_models)} 个模型支持API模式，请在下拉菜单中选择"
-        
-        # 检查Token有效性（如果提供）
-        token_status = ""
-        if api_token.strip():
-            # 可以在这里调用Token验证函数
-            token_status = "\n🔑 使用认证Token"
-        
-        # 模拟加载成功
-        pipe = "api_mode"
-        img2img_pipe = "api_mode" 
-        controlnet_pipe = "api_mode"
-        current_controlnet = controlnet_type
-        
-        # 判断模型类型并给出相应提示
-        if selected_model.startswith("black-forest-labs/FLUX"):
-            quality_tip = "\n⚡ FLUX系列 - 最新一代模型，图像质量极高"
-        elif selected_model.startswith("stabilityai/stable-diffusion-xl"):
-            quality_tip = "\n� SDXL系列 - 高分辨率生成，经典选择"
-        elif selected_model.startswith("stabilityai/stable-diffusion-3"):
-            quality_tip = "\n🚀 SD3系列 - 最新技术，文本理解能力强"
-        else:
-            quality_tip = "\n📝 经典模型 - 稳定可靠"
-        
-        return f"✅ API模式配置成功！\n📦 当前模型: {model_name}\n🎯 模型ID: {selected_model}\n🎮 ControlNet: {CONTROLNET_TYPES[controlnet_type]['name']}{quality_tip}{token_status}\n💾 存储空间占用: 0 GB\n\n💡 API模式无需下载模型，生成图片通过云端推理"
-    
-    else:
-        # 本地模式 - 下载模型到本地
-        try:
-            # 基础文生图管道
-            pipe = StableDiffusionPipeline.from_pretrained(
-                selected_model,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                safety_checker=None,
-                requires_safety_checker=False
-            )
-            pipe = pipe.to(device)
-            pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-            
-            # 传统图生图管道
-            img2img_pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-                selected_model,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                safety_checker=None,
-                requires_safety_checker=False
-            )
-            img2img_pipe = img2img_pipe.to(device)
-            img2img_pipe.scheduler = DPMSolverMultistepScheduler.from_config(img2img_pipe.scheduler.config)
-            
-            # ControlNet 管道
-            try:
-                current_controlnet = controlnet_type
-                controlnet_info = CONTROLNET_TYPES[controlnet_type]
-                
-                controlnet = ControlNetModel.from_pretrained(
-                    controlnet_info["model_id"],
-                    torch_dtype=torch.float16 if device == "cuda" else torch.float32
-                )
-                controlnet_pipe = StableDiffusionControlNetPipeline.from_pretrained(
-                    selected_model,
-                    controlnet=controlnet,
-                    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                    safety_checker=None,
-                    requires_safety_checker=False
-                )
-                controlnet_pipe = controlnet_pipe.to(device)
-                controlnet_pipe.scheduler = DPMSolverMultistepScheduler.from_config(controlnet_pipe.scheduler.config)
-                return f"✅ 本地模式所有模型加载成功！\n📦 当前模型: {model_name}\n🎯 模型ID: {selected_model}\n🎮 ControlNet: {controlnet_info['name']}\n💾 预计存储占用: ~6-10 GB"
-            except Exception as controlnet_error:
-                return f"✅ 本地模式基础模型加载成功！\n📦 当前模型: {model_name}\n🎯 模型ID: {selected_model}\n⚠️ ControlNet加载失败: {str(controlnet_error)}\n💡 文生图和传统图生图功能可正常使用\n💾 预计存储占用: ~4-7 GB"
-            
-        except Exception as e:
-            return f"❌ 本地模式加载失败: {str(e)}\n💡 建议尝试API模式以避免存储空间问题"
-
-def generate_image(prompt, negative_prompt, num_steps, guidance_scale, width, height, seed):
-    """基础文生图功能"""
-    global pipe, current_model, RUN_MODE
-    
-    if pipe is None:
-        return None, "Please load the model first"
-    
-    if RUN_MODE == "api":
-        # API模式
-        try:
-            image, status = generate_image_api(prompt, negative_prompt, current_model)
-            return image, status
-        except Exception as e:
-            return None, f"❌ API生成失败: {str(e)}"
-    
-    else:
-        # 本地模式
-        try:
-            # 设置随机种子
-            if seed != -1:
-                generator = torch.Generator(device=device).manual_seed(seed)
-            else:
-                generator = None
-                
-            # 生成图像
-            with torch.autocast(device):
-                result = pipe(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt if negative_prompt else None,
-                    num_inference_steps=num_steps,
-                    guidance_scale=guidance_scale,
-                    width=width,
-                    height=height,
-                    generator=generator
-                )
-            
-            image = result.images[0]
-            return image, "✅ 本地图像生成成功！"
-            
-        except Exception as e:
-            return None, f"❌ 本地生成失败: {str(e)}"
-
-def preprocess_canny(image, low_threshold=100, high_threshold=200):
-    """预处理图像为Canny边缘"""
-    image = np.array(image)
-    canny = cv2.Canny(image, low_threshold, high_threshold)
-    canny_image = canny[:, :, None]
-    canny_image = np.concatenate([canny_image, canny_image, canny_image], axis=2)
-    return Image.fromarray(canny_image)
-
-def preprocess_scribble(image):
-    """预处理图像为涂鸦风格（简化边缘）"""
-    image = np.array(image)
-    # 转换为灰度图
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    # 使用边缘检测但参数更宽松，模拟涂鸦效果
-    edges = cv2.Canny(gray, 50, 150)
-    # 膨胀操作使线条更粗，更像涂鸦
-    kernel = np.ones((3,3), np.uint8)
-    edges = cv2.dilate(edges, kernel, iterations=1)
-    # 转换回RGB
-    scribble_image = edges[:, :, None]
-    scribble_image = np.concatenate([scribble_image, scribble_image, scribble_image], axis=2)
-    return Image.fromarray(scribble_image)
-
-def preprocess_depth(image):
-    """预处理图像为深度图（使用简单的深度估计）"""
-    image = np.array(image)
-    # 转换为灰度图作为简单的深度估计
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    # 应用高斯模糊来模拟深度感
-    depth = cv2.GaussianBlur(gray, (5, 5), 0)
-    # 增强对比度
-    depth = cv2.equalizeHist(depth)
-    # 转换回RGB
-    depth_image = depth[:, :, None]
-    depth_image = np.concatenate([depth_image, depth_image, depth_image], axis=2)
-    return Image.fromarray(depth_image)
-
-def preprocess_control_image(image, control_type):
-    """根据控制类型预处理图像"""
-    if control_type == "canny":
-        return preprocess_canny(image)
-    elif control_type == "scribble":
-        return preprocess_scribble(image)
-    elif control_type == "depth":
-        return preprocess_depth(image)
-    else:
-        return preprocess_canny(image)  # 默认使用canny
-
-def generate_controlnet_image(prompt, negative_prompt, control_image, control_type, num_steps, guidance_scale, controlnet_conditioning_scale, width, height, seed):
-    """ControlNet图像引导生成"""
-    global controlnet_pipe, current_controlnet, RUN_MODE
-    
-    if controlnet_pipe is None:
-        return None, None, "❌ 请先加载模型"
-    
-    if control_image is None:
-        return None, None, "❌ 请上传控制图像"
-    
-    # 检查当前加载的ControlNet类型是否匹配
-    if current_controlnet != control_type:
-        return None, None, f"❌ 当前加载的是 {CONTROLNET_TYPES[current_controlnet]['name']}，请重新加载模型选择 {CONTROLNET_TYPES[control_type]['name']}"
-    
-    # 预处理控制图像
-    processed_image = preprocess_control_image(control_image, control_type)
-    
-    if RUN_MODE == "api":
-        # API模式
-        try:
-            image, status = generate_controlnet_image_api(prompt, negative_prompt, processed_image, control_type)
-            return image, processed_image, status
-        except Exception as e:
-            return None, processed_image, f"❌ API生成失败: {str(e)}"
-    
-    else:
-        # 本地模式
-        try:
-            # 设置随机种子
-            if seed != -1:
-                generator = torch.Generator(device=device).manual_seed(seed)
-            else:
-                generator = None
-                
-            # 生成图像
-            with torch.autocast(device):
-                result = controlnet_pipe(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt if negative_prompt else None,
-                    image=processed_image,
-                    num_inference_steps=num_steps,
-                    guidance_scale=guidance_scale,
-                    controlnet_conditioning_scale=controlnet_conditioning_scale,
-                    width=width,
-                    height=height,
-                    generator=generator
-                )
-            
-            image = result.images[0]
-            control_type_name = CONTROLNET_TYPES[control_type]['name']
-            return image, processed_image, f"✅ {control_type_name}图像生成成功！"
-            
-        except Exception as e:
-            return None, processed_image, f"❌ 生成失败: {str(e)}"
-
-def generate_img2img(prompt, negative_prompt, input_image, strength, num_steps, guidance_scale, width, height, seed):
-    """传统图生图功能"""
-    global img2img_pipe, RUN_MODE
-    
-    if img2img_pipe is None:
-        return None, "❌ 请先加载模型"
-    
-    if input_image is None:
-        return None, "❌ 请上传输入图像"
-    
-    # 调整图像大小
-    input_image = input_image.resize((width, height))
-    
-    if RUN_MODE == "api":
-        # API模式
-        try:
-            image, status = generate_img2img_api(prompt, negative_prompt, input_image, strength)
-            return image, status
-        except Exception as e:
-            return None, f"❌ API生成失败: {str(e)}"
-    
-    else:
-        # 本地模式
-        try:
-            # 设置随机种子
-            if seed != -1:
-                generator = torch.Generator(device=device).manual_seed(seed)
-            else:
-                generator = None
-                
-            # 生成图像
-            with torch.autocast(device):
-                result = img2img_pipe(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt if negative_prompt else None,
-                    image=input_image,
-                    strength=strength,
-                    num_inference_steps=num_steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator
-                )
-            
-            image = result.images[0]
-            return image, "✅ 传统图生图成功！"
-            
-        except Exception as e:
-            return None, f"❌ 生成失败: {str(e)}"
-
-def add_prompt_tags(current_prompt, selected_tags):
-    """添加选中的标签到prompt中"""
-    if not selected_tags:
-        return current_prompt
-    
-    # 将选中的标签合并
-    new_tags = ", ".join(selected_tags)
-    
-    if current_prompt:
-        # 如果已有prompt，则添加到末尾
-        return f"{current_prompt}, {new_tags}"
-    else:
-        # 如果没有prompt，直接使用标签
-        return new_tags
-
-def get_current_model_info():
-    """获取当前模型信息"""
-    global current_model
-    if current_model:
-        model_name = MODELS.get(current_model, current_model)
-        return f"📦 当前模型: {model_name}"
-    else:
-        return "❌ 未加载模型"
 
 # 创建Gradio界面
 def create_interface():
@@ -785,6 +65,7 @@ def create_interface():
                     label="🤖 选择基础模型 (仅API支持的模型)",
                     info="✅ API模式 - 这些模型支持云端推理，无需下载"
                 )
+                
                 controlnet_dropdown = gr.Dropdown(
                     choices=[(f"{info['name']} - {info['description']}", key) for key, info in CONTROLNET_TYPES.items()],
                     value="canny",
@@ -870,34 +151,6 @@ def create_interface():
                     
                     test_proxy_btn = gr.Button("🔗 测试代理连接", variant="secondary")
                     
-                    def test_proxy_connection(enabled, http_proxy, https_proxy):
-                        """测试代理连接"""
-                        if not enabled:
-                            return "❌ 代理未启用，无法测试"
-                        
-                        if not (http_proxy or https_proxy):
-                            return "❌ 请填写代理地址"
-                        
-                        proxies = {}
-                        if http_proxy:
-                            proxies["http"] = http_proxy
-                        if https_proxy:
-                            proxies["https"] = https_proxy
-                        
-                        try:
-                            # 测试连接到 Hugging Face
-                            response = requests.get(
-                                "https://huggingface.co", 
-                                proxies=proxies, 
-                                timeout=10
-                            )
-                            if response.status_code == 200:
-                                return "✅ 代理连接测试成功！"
-                            else:
-                                return f"⚠️ 代理连接测试失败，状态码: {response.status_code}"
-                        except Exception as e:
-                            return f"❌ 代理连接测试失败: {str(e)}"
-                    
                     test_proxy_btn.click(
                         test_proxy_connection,
                         inputs=[proxy_enabled, http_proxy_input, https_proxy_input],
@@ -905,6 +158,7 @@ def create_interface():
                     )
                     
                 load_btn = gr.Button("🚀 加载选中模型", variant="primary", size="lg")
+                
             with gr.Column(scale=2):
                 current_model_display = gr.Textbox(
                     label="当前模型状态", 
@@ -937,7 +191,6 @@ def create_interface():
                     interactive=False,
                     lines=2
                 )
-        
         
         # Prompt 辅助选择器
         with gr.Accordion("🎯 Prompt 辅助选择器", open=False):
@@ -1164,7 +417,7 @@ def create_interface():
         gr.Markdown("""
         ## 💡 三种模式对比与使用指南
         
-        ### � **运行模式详细对比**
+        ### 🌐 **运行模式详细对比**
         
         | 运行模式 | 存储空间 | 初始化时间 | 生成速度 | 网络要求 | 成本 | 推荐指数 |
         |----------|----------|------------|----------|----------|------|----------|
@@ -1182,7 +435,7 @@ def create_interface():
         - 🟢 **需要频繁生成** → 选择本地模式  
         - 🟢 **初次体验** → 建议API模式
         
-        ### �🔍 **生成模式对比表**
+        ### 🔍 **生成模式对比表**
         
         | 模式 | 输入 | 控制方式 | 优势 | 适用场景 |
         |------|------|----------|------|----------|
@@ -1223,21 +476,18 @@ def create_interface():
         
         # API Token 设置事件
         def update_api_token(token):
-            global HF_API_TOKEN
-            HF_API_TOKEN = token.strip() if token else None
+            set_api_token(token)
             return f"🔑 API Token {'已设置' if token else '未设置'}"
         
         # 运行模式切换事件 - 更新模型选择器和显示
         def update_run_mode_and_models(mode):
-            global RUN_MODE
-            RUN_MODE = mode
             mode_text = "🌐 API模式" if mode == "api" else "💻 本地模式"
             storage_text = "存储占用: 0 GB" if mode == "api" else "存储占用: 4-10 GB"
             status_text = f"⚙️ {mode_text}\n💾 {storage_text}"
             
             # 同时更新模型选择器
-            model_update = update_model_choices(mode)
-            return status_text, model_update
+            model_choices_info = update_model_choices(mode)
+            return status_text, gr.Dropdown.update(**model_choices_info)
         
         run_mode_radio.change(
             update_run_mode_and_models,
@@ -1377,26 +627,14 @@ def create_interface():
             outputs=[negative_prompt2]
         )
         
-        # 全局应用按钮事件（兼容性保留）
-        apply_positive_tags_btn.click(
-            get_selected_positive_tags,
-            inputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags],
-            outputs=[]
-        )
-        
-        apply_negative_tags_btn.click(
-            get_selected_negative_tags,
-            inputs=[neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags],
-            outputs=[]
-        )
-        
+        # 清空标签
         clear_tags_btn.click(
             clear_all_tags,
             outputs=[quality_tags, style_tags, lighting_tags, composition_tags, mood_tags, scene_tags, color_tags,
                     neg_quality_tags, neg_anatomy_tags, neg_face_tags, neg_style_tags, neg_tech_tags, neg_lighting_tags, neg_composition_tags]
         )
         
-        # 原有的生成事件
+        # 图像生成事件
         generate_btn1.click(
             generate_image,
             inputs=[prompt1, negative_prompt1, num_steps1, guidance_scale1, width1, height1, seed1],
@@ -1415,257 +653,7 @@ def create_interface():
             outputs=[output_image2, control_preview, output_status2]
         )
         
-        # 更新模型选择器
-        run_mode_radio.change(
-            update_model_choices,
-            inputs=[run_mode_radio],
-            outputs=[model_dropdown]
-        )
-        
         return demo
-
-def query_hf_api(endpoint, payload, api_token=None):
-    """Call Hugging Face API with proxy support"""
-    headers = {"Content-Type": "application/json"}
-    if api_token:
-        headers["Authorization"] = f"Bearer {api_token}"
-    
-    # 配置代理
-    proxies = {}
-    if PROXY_CONFIG["enabled"]:
-        if PROXY_CONFIG["http"]:
-            proxies["http"] = PROXY_CONFIG["http"]
-        if PROXY_CONFIG["https"]:
-            proxies["https"] = PROXY_CONFIG["https"]
-    
-    try:
-        # 增加超时时间并使用代理
-        response = requests.post(
-            endpoint, 
-            headers=headers, 
-            json=payload, 
-            timeout=120,  # 增加到2分钟
-            proxies=proxies if proxies else None
-        )
-        
-        if response.status_code == 200:
-            return response.content
-        elif response.status_code == 503:
-            raise Exception("Model is loading, please try again later")
-        elif response.status_code == 429:
-            raise Exception("API rate limit exceeded, please try again later")
-        elif response.status_code == 401:
-            raise Exception("Invalid or missing API token")
-        elif response.status_code == 404:
-            raise Exception("Model endpoint not found")
-        else:
-            # Ensure error message is ASCII safe
-            error_text = "Unknown API error"
-            try:
-                if response.text:
-                    # Try to get ASCII-safe error message
-                    error_text = response.text.encode('ascii', 'ignore').decode('ascii')
-                    if not error_text.strip():
-                        error_text = "API error with non-ASCII response"
-            except:
-                error_text = "API response encoding error"
-            raise Exception(f"API call failed: {response.status_code}, {error_text}")
-    except requests.exceptions.Timeout:
-        proxy_info = f" (using proxy: {proxies})" if proxies else " (no proxy)"
-        raise Exception(f"API call timeout after 120s{proxy_info}, please check network connection or proxy settings")
-    except requests.exceptions.ConnectionError as e:
-        proxy_info = f" (using proxy: {proxies})" if proxies else " (no proxy)"
-        raise Exception(f"Network connection error{proxy_info}, please check network settings or try enabling proxy")
-    except Exception as e:
-        # Ensure all error messages are ASCII safe
-        error_msg = str(e)
-        try:
-            error_msg.encode('ascii')
-        except UnicodeEncodeError:
-            error_msg = "API call error with encoding issues"
-        raise Exception(error_msg)
-
-def generate_image_api(prompt, negative_prompt="", model_id="runwayml/stable-diffusion-v1-5"):
-    """Generate image using API"""
-    endpoint = API_ENDPOINTS.get(model_id)
-    if not endpoint:
-        raise Exception(f"Model {model_id} does not support API mode")
-    
-    # Ensure prompt and negative_prompt are ASCII safe
-    try:
-        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
-        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
-    except:
-        safe_prompt = "safe prompt"
-        safe_negative_prompt = ""
-    
-    payload = {
-        "inputs": safe_prompt,
-        "parameters": {
-            "negative_prompt": safe_negative_prompt,
-            "num_inference_steps": 20,
-            "guidance_scale": 7.5,
-        }
-    }
-    
-    try:
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        return image, "API image generation successful!"
-    except Exception as e:
-        return None, f"API generation failed: {str(e)}"
-
-def generate_controlnet_image_api(prompt, negative_prompt, control_image, control_type):
-    """Generate ControlNet image using API"""
-    endpoint = CONTROLNET_API_ENDPOINTS.get(control_type)
-    if not endpoint:
-        raise Exception(f"ControlNet type {control_type} does not support API mode")
-    
-    # Convert control image to base64
-    import base64
-    import io
-    
-    buffered = io.BytesIO()
-    control_image.save(buffered, format="PNG")
-    control_image_b64 = base64.b64encode(buffered.getvalue()).decode()
-    
-    # Ensure prompt and negative_prompt are safe
-    try:
-        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
-        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
-    except:
-        safe_prompt = "safe prompt"
-        safe_negative_prompt = ""
-    
-    payload = {
-        "inputs": {
-            "prompt": safe_prompt,
-            "image": control_image_b64,
-            "negative_prompt": safe_negative_prompt
-        }
-    }
-    
-    try:
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        control_type_name = CONTROLNET_TYPES[control_type]['name']
-        return image, f"API mode {control_type_name} image generation successful!"
-    except Exception as e:
-        return None, f"ControlNet API generation failed: {str(e)}"
-
-def generate_img2img_api(prompt, negative_prompt, input_image, strength):
-    """Generate img2img image using API"""
-    # Note: Hugging Face public API has limited img2img support
-    # This is a basic implementation that may need adjustment
-    endpoint = API_ENDPOINTS.get("runwayml/stable-diffusion-v1-5")  # Use default model
-    if not endpoint:
-        raise Exception("img2img API mode not supported")
-    
-    # Convert input image to base64
-    import base64
-    import io
-    
-    buffered = io.BytesIO()
-    input_image.save(buffered, format="PNG")
-    input_image_b64 = base64.b64encode(buffered.getvalue()).decode()
-    
-    # Ensure prompt and negative_prompt are safe
-    try:
-        safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
-        safe_negative_prompt = negative_prompt.encode('utf-8', 'ignore').decode('utf-8') if negative_prompt else ""
-    except:
-        safe_prompt = "safe prompt"
-        safe_negative_prompt = ""
-    
-    # Note: This is a simplified implementation, real img2img API may need different payload format
-    payload = {
-        "inputs": {
-            "prompt": safe_prompt,
-            "image": input_image_b64,
-            "negative_prompt": safe_negative_prompt,
-            "strength": strength
-        }
-    }
-    
-    try:
-        # Note: Since Hugging Face public API has limited img2img support, this may fail
-        # Users are recommended to use text-to-image function in API mode
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        return image, "API mode img2img image generation successful!"
-    except Exception as e:
-        return None, f"img2img API not supported, recommend using local mode or text-to-image function: {str(e)}"
-    
-    # 将输入图像转换为base64
-    import base64
-    import io
-    
-    buffered = io.BytesIO()
-    input_image.save(buffered, format="PNG")
-    input_image_b64 = base64.b64encode(buffered.getvalue()).decode()
-    
-    # 注意：这是一个简化的实现，真实的img2img API可能需要不同的payload格式
-    payload = {
-        "inputs": {
-            "prompt": prompt,
-            "image": input_image_b64,
-            "negative_prompt": negative_prompt if negative_prompt else "",
-            "strength": strength
-        }
-    }
-    
-    try:
-        # 注意：由于Hugging Face公共API对img2img支持有限，这里可能会失败
-        # 建议用户在API模式下优先使用文生图功能
-        image_bytes = query_hf_api(endpoint, payload, HF_API_TOKEN)
-        image = Image.open(io.BytesIO(image_bytes))
-        return image, "✅ API模式 img2img 图像生成成功！"
-    except Exception as e:
-        return None, f"❌ img2img API暂不支持，建议使用本地模式或文生图功能: {str(e)}"
-
-def update_model_choices(run_mode):
-    """根据运行模式动态更新模型选择器"""
-    available_models = get_available_models(run_mode)
-    
-    if run_mode == "api":
-        # API模式：只显示支持API的模型，按推荐程度排序
-        recommended_order = [
-            "black-forest-labs/FLUX.1-dev",
-            "black-forest-labs/FLUX.1-schnell", 
-            "stabilityai/stable-diffusion-xl-base-1.0",
-            "stabilityai/stable-diffusion-3.5-large",
-            "stabilityai/stable-diffusion-3-medium-diffusers",
-            "latent-consistency/lcm-lora-sdxl",
-            "Kwai-Kolors/Kolors",
-            "runwayml/stable-diffusion-v1-5",
-            "stabilityai/stable-diffusion-2-1",
-            "prompthero/openjourney",
-            "dreamlike-art/dreamlike-diffusion-1.0"
-        ]
-        
-        choices = []
-        for model_id in recommended_order:
-            if model_id in available_models:
-                choices.append(model_id)
-        
-        # 默认选择第一个推荐模型
-        default_value = choices[0] if choices else "black-forest-labs/FLUX.1-dev"
-        
-        return gr.Dropdown.update(
-            choices=choices,
-            value=default_value,
-            label="🤖 选择基础模型 (仅API支持的模型)",
-            info="✅ API模式 - 这些模型支持云端推理，无需下载"
-        )
-    else:
-        # 本地模式：显示所有模型
-        choices = list(available_models.keys())
-        return gr.Dropdown.update(
-            choices=choices,
-            value="runwayml/stable-diffusion-v1-5",
-            label="🤖 选择基础模型 (支持所有模型)",
-            info="💾 本地模式 - 首次使用需要下载模型文件（4-10GB）"
-        )
 
 # 主函数：启动Gradio应用
 if __name__ == "__main__":
@@ -1673,19 +661,41 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 正在初始化界面...")
     
+    # 设置自动端口释放机制
+    print("🛡️ 设置自动端口释放机制...")
+    setup_cleanup_handlers()
+    
+    # 寻找可用端口
+    available_port = find_free_port(7861)
+    
     # 创建并启动界面
     demo = create_interface()
     
+    # 设置全局变量，用于清理函数
+    utils.demo_instance = demo
+    utils.server_port = available_port
+    
     print("✅ 界面初始化完成！")
-    print("🌐 正在启动服务器...")
+    print(f"🌐 正在启动服务器，端口: {available_port}")
+    print("💡 程序退出时将自动释放端口")
     print("=" * 60)
     
-    # 启动Gradio应用
-    demo.launch(
-        server_name="0.0.0.0",  # 允许外部访问
-        server_port=7861,       # 端口
-        share=False,            # 不使用公共链接
-        inbrowser=True,         # 自动打开浏览器
-        show_error=True,        # 显示错误信息
-        debug=False             # 生产模式
-    )
+    try:
+        # 启动Gradio应用
+        demo.launch(
+            server_name="0.0.0.0",        # 允许外部访问
+            server_port=available_port,    # 使用找到的可用端口
+            share=False,                   # 不使用公共链接
+            inbrowser=True,                # 自动打开浏览器
+            show_error=True,               # 显示错误信息
+            debug=False                    # 生产模式
+        )
+    except KeyboardInterrupt:
+        print("\n🛑 收到键盘中断信号...")
+        utils.cleanup_on_exit()
+    except Exception as e:
+        print(f"\n❌ 启动失败: {e}")
+        utils.cleanup_on_exit()
+    finally:
+        print("\n🔄 程序结束，确保资源清理...")
+        utils.cleanup_on_exit()
